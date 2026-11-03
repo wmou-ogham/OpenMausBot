@@ -82,6 +82,7 @@ const support: AcpSupport = {
       : {}),
   },
   images: true,
+  audio: true,
   spawnArgs: () => [],
   selectModel: { configId: "model" },
   resumeMethod: "resume",

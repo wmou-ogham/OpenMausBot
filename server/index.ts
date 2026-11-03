@@ -261,6 +261,7 @@ import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } f
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { prepareInboundText } from "./inbound-attachments.ts";
 import { telegramChannelPrompt } from "./telegram-channel.ts";
+import { extractTurnAudio } from "./turn-audio.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
@@ -5893,8 +5894,12 @@ async function startTurn(
   // path-reading drivers retain the attachment tag as their compatibility route.
   const resolvedImages = extractTurnImages(text);
   const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
-  const providerText = usesNativeImageInput ? resolvedImages.text : text;
+  const afterImages = usesNativeImageInput ? resolvedImages.text : text;
+  const resolvedAudio = extractTurnAudio(afterImages);
+  const usesNativeAudioInput = instance.adapter.capabilities.nativeAudioInput === true;
+  const providerText = usesNativeAudioInput ? resolvedAudio.text : afterImages;
   const turnImages = usesNativeImageInput ? resolvedImages.images : [];
+  const turnAudio = usesNativeAudioInput ? resolvedAudio.audio : [];
   const commsDepth = opts?.commsDepth ?? 0;
   // Classify the turn where the peer paths' depth actually arrives: by the
   // time it settles, the fold has only a thread id to go on.
@@ -5920,7 +5925,7 @@ async function startTurn(
     }
   }
 
-  console.error(`[omb-turn] bot=${botId} text=${JSON.stringify(resolvedImages.text.slice(0, 70))} images=${turnImages.length} depth=${commsDepth} card=${Boolean(opts?.cardContinuation)}`);
+  console.error(`[omb-turn] bot=${botId} text=${JSON.stringify(providerText.slice(0, 70))} images=${turnImages.length} audio=${turnAudio.length} depth=${commsDepth} card=${Boolean(opts?.cardContinuation)}`);
   const instanceId = instance.instanceId;
   if (providerInstancesChanging.has(instanceId)) {
     throw Object.assign(new Error("this provider account is being updated — try again shortly"), { status: 409 });
@@ -6813,6 +6818,7 @@ async function startTurn(
               text: routedContext.turnText,
               refreshSystemPrompt: true,
               images: turnImages,
+              audio: turnAudio,
               approvalMode: approvalModeForTurn(bot, commsDepth > 0),
               model,
               effort,

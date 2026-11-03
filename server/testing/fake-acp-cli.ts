@@ -395,6 +395,7 @@ function handle(msg: any) {
       const authMethods = mode === "no-auth" ? [] : [{ id: process.env.FAKE_ACP_AUTH_METHOD ?? "cached_token" }];
       const agentName = process.env.FAKE_ACP_AGENT_NAME;
       const acceptsImages = process.env.FAKE_ACP_IMAGE_CAPABILITY === "1";
+      const acceptsAudio = process.env.FAKE_ACP_AUDIO_CAPABILITY === "1";
       // which remote MCP transports this agent advertises, e.g. "http,sse"
       const mcpTransports = (process.env.FAKE_ACP_MCP_TRANSPORTS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
       result(msg.id, {
@@ -403,10 +404,10 @@ function handle(msg: any) {
         agentInfo: agentName
           ? { name: agentName, version: process.env.FAKE_ACP_AGENT_VERSION ?? "test" }
           : undefined,
-        agentCapabilities: agentName || acceptsImages || mcpTransports.length
+        agentCapabilities: agentName || acceptsImages || acceptsAudio || mcpTransports.length
           ? {
               ...(agentName ? { loadSession: true, sessionCapabilities: { resume: true }, auth: { logout: true } } : {}),
-              ...(acceptsImages ? { promptCapabilities: { image: true } } : {}),
+              ...(acceptsImages || acceptsAudio ? { promptCapabilities: { ...(acceptsImages ? { image: true } : {}), ...(acceptsAudio ? { audio: true } : {}) } } : {}),
               ...(mcpTransports.length ? { mcpCapabilities: { http: mcpTransports.includes("http"), sse: mcpTransports.includes("sse") } } : {}),
             }
           : undefined,
