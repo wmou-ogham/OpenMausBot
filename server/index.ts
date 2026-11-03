@@ -260,7 +260,7 @@ import { ANTIGRAVITY_CHECKPOINT_ERROR, antigravityAffinityForDispatch, isTelegra
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { prepareInboundText } from "./inbound-attachments.ts";
-import { TELEGRAM_CHANNEL_PROMPT } from "./telegram-channel.ts";
+import { telegramChannelPrompt } from "./telegram-channel.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
@@ -6788,7 +6788,7 @@ async function startTurn(
         { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
         { id: "playbooks", label: "Playbooks", text: packagePlaybooks },
-        { id: "telegram", label: "Telegram", text: isTelegramThread(threadId) ? TELEGRAM_CHANNEL_PROMPT : "" },
+        { id: "telegram", label: "Telegram", text: isTelegramThread(threadId) ? telegramChannelPrompt(bot.id) : "" },
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
         { id: "mentions", label: "Mentions", text: boundedCoordination && tagged.length ? `The user named these existing teammates: ${tagged.map(b => `${peerName(b.name)} (${b.id})`).join(", ")}. Use coordinate_bots when their contribution is needed; do not substitute native helper agents for these bots.` : mentionPrompt(tagged) },
       ]);
