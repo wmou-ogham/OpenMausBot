@@ -52,6 +52,12 @@ const NativeImageDriver = createAcpDriver({
   images: true,
 });
 
+const NativeAudioDriver = createAcpDriver({
+  ...SELECT_MODEL_SUPPORT,
+  driverKind: "nativeAudioTest",
+  audio: true,
+});
+
 /** Proves transformEnv can vary with the instance config, which is how the
  *  opencode driver picks its permission policy from `fullAuto`. */
 const EnvPolicyDriver = createAcpDriver({
@@ -232,6 +238,7 @@ describe("ACP turns (fake CLI)", () => {
     delete process.env.FAKE_ACP_USAGE_ROOT;
     delete process.env.FAKE_ACP_LOAD_NULL;
     delete process.env.FAKE_ACP_IMAGE_CAPABILITY;
+    delete process.env.FAKE_ACP_AUDIO_CAPABILITY;
     delete process.env.FAKE_ACP_GROK_VERSION;
     delete process.env.FAKE_ACP_DUMP_PROMPT;
     delete process.env.FAKE_ACP_REPLY;
@@ -348,6 +355,29 @@ describe("ACP turns (fake CLI)", () => {
     const nativeLog = readFileSync(join(NATIVE_DIR, "t-acp-native-image.ndjson"), "utf8");
     expect(nativeLog).not.toContain(base64);
     expect(nativeLog).toContain(`[image data: ${base64.length} base64 chars]`);
+  });
+
+  it("sends short voice as an ACP audio block", async () => {
+    const dump = join(scratch, "audio-prompt.json");
+    const audioPath = join(scratch, "voice.ogg");
+    const bytes = Buffer.from("private-acp-audio-bytes");
+    writeFileSync(audioPath, bytes);
+    process.env.FAKE_ACP_DUMP = dump;
+    process.env.FAKE_ACP_DUMP_PROMPT = "1";
+    process.env.FAKE_ACP_AUDIO_CAPABILITY = "1";
+    await create(NativeAudioDriver);
+
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "t-acp-native-audio",
+      text: "Listen",
+      audio: [{ path: audioPath, mime: "audio/ogg", bytes: bytes.length }],
+    });
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+
+    expect(JSON.parse(readFileSync(`${dump}.prompt.json`, "utf8"))).toEqual([
+      { type: "text", text: "Listen" },
+      { type: "audio", data: bytes.toString("base64"), mimeType: "audio/ogg" },
+    ]);
   });
 
   it("fails clearly when an image-capable adapter meets an older ACP runtime", async () => {

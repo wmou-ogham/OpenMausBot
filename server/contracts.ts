@@ -61,6 +61,14 @@ export interface TurnImageInput {
   bytes: number;
 }
 
+/** A short voice note already admitted to the attachment store. Drivers that
+ * advertise audio input receive the bytes; others keep the file tag in text. */
+export interface TurnAudioInput {
+  path: string;
+  mime: "audio/ogg" | "audio/mpeg" | "audio/mp4" | "audio/wav" | "audio/flac" | "audio/aac" | "audio/webm";
+  bytes: number;
+}
+
 // ── instance configuration envelope ────────────────────────────────────
 // `driver` is any slug — NOT validated against known drivers; unknown
 // drivers round-trip and surface as unavailable shadow snapshots so a
@@ -108,6 +116,9 @@ export interface SendTurnInput {
    * of replay transcripts: the provider's native session owns earlier image
    * context, while a fresh replay retains the visible attachment marker. */
   images?: TurnImageInput[];
+  /** Short voice attached to this user turn only. Same replay rule as images:
+   * the native session keeps earlier audio, and a fresh replay keeps the tag. */
+  audio?: TurnAudioInput[];
   model?: string;
   effort?: EffortLevel;
   variant?: string;
@@ -259,6 +270,8 @@ export interface ProviderAdapter {
      * input. Image-capable legacy drivers may instead read the attachment
      * path kept in `text`; central dispatch strips that tag only here. */
     nativeImageInput?: boolean;
+    /** True only when sendTurn consumes `audio` as structured provider input. */
+    nativeAudioInput?: boolean;
     /** Effort levels this driver can pass to its CLI, ascending. Absent =
      * the driver cannot set effort, so the app never offers the control —
      * same rule as computerMcp: never show a knob the driver cannot turn. */

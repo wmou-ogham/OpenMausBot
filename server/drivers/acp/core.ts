@@ -43,6 +43,7 @@ import type {
   RuntimeEventListener,
   SendTurnInput,
   ProviderErrorCode,
+  TurnAudioInput,
   TurnImageInput,
 } from "../../contracts.ts";
 import { newEventId, newId } from "../../contracts.ts";
@@ -92,6 +93,8 @@ export interface AcpSupport {
   /** Whether models behind this ACP harness can consume a referenced image.
    * Most coding agents can open local files; opt out for text-only agents. */
   images?: boolean;
+  /** Whether this harness can put short voice notes into the ACP prompt. */
+  audio?: boolean;
   /** Narrow compatibility exception for a CLI with verified native image
    * transport but a defective initialize capability (never a path fallback). */
   acceptsUnadvertisedImages?(initializeResult: unknown): boolean;
@@ -237,6 +240,14 @@ async function readAcpImageBlocks(images: readonly TurnImageInput[]) {
   })));
 }
 
+async function readAcpAudioBlocks(audio: readonly TurnAudioInput[]) {
+  return Promise.all(audio.map(async (clip) => ({
+    type: "audio" as const,
+    data: (await readFile(clip.path)).toString("base64"),
+    mimeType: clip.mime,
+  })));
+}
+
 function sanitizeToolLogValue(value: unknown, budget: { nodes: number; text: number }, depth = 0): unknown {
   if (depth > 12 || budget.nodes-- <= 0) return undefined;
   if (typeof value === "string") {
@@ -255,8 +266,8 @@ function sanitizeToolLogValue(value: unknown, budget: { nodes: number; text: num
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
   return Object.fromEntries(Object.entries(record).flatMap(([key, entry]) => {
-    if ((record.type === "image" && (key === "data" || key === "blob")) ||
-      (key === "blob" && typeof record.mimeType === "string" && record.mimeType.startsWith("image/"))) return [];
+    if (((record.type === "image" || record.type === "audio") && (key === "data" || key === "blob")) ||
+      (key === "blob" && typeof record.mimeType === "string" && (record.mimeType.startsWith("image/") || record.mimeType.startsWith("audio/")))) return [];
     const sanitized = sanitizeToolLogValue(entry, budget, depth + 1);
     return sanitized === undefined ? [] : [[key, sanitized]];
   }));
@@ -390,8 +401,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             params: {
               ...msg.params,
               prompt: prompt.map((content: any) =>
-                content?.type === "image" && typeof content.data === "string"
-                  ? { ...content, data: `[image data: ${content.data.length} base64 chars]` }
+                (content?.type === "image" || content?.type === "audio") && typeof content.data === "string"
+                  ? { ...content, data: `[${content.type} data: ${content.data.length} base64 chars]` }
                   : content
               ),
             },
@@ -1148,6 +1159,16 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             const imageBlocks = support.images === true && runtimeAcceptsImages
               ? await readAcpImageBlocks(images)
               : [];
+            const clips = turn.audio ?? [];
+            const runtimeAcceptsAudio = init?.agentCapabilities?.promptCapabilities?.audio === true;
+            if (clips.length && support.audio === true && !runtimeAcceptsAudio) {
+              throw new Error(
+                `${support.displayName} is configured for audio attachments, but this installed runtime does not advertise ACP audio input.`,
+              );
+            }
+            const audioBlocks = support.audio === true && runtimeAcceptsAudio
+              ? await readAcpAudioBlocks(clips)
+              : [];
             if (support.modelVariants && cliTurn.model && modelOf(sessionConfigResult) !== cliTurn.model) {
               throw new Error(`${support.displayName} changed model before the prompt`);
             }
@@ -1157,7 +1178,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             state.promptSent = true;
             const result = await request("session/prompt", {
               sessionId,
-              prompt: [{ type: "text", text }, ...imageBlocks],
+              prompt: [{ type: "text", text }, ...imageBlocks, ...audioBlocks],
             });
             // opencode 1.18.18 reports usage at the result root; grok and
             // gemini put it under _meta. Read both rather than lose the count.
@@ -1261,6 +1282,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             browserMcp: true,
             images: support.images !== false,
             nativeImageInput: support.images === true,
+            nativeAudioInput: support.audio === true,
             effortLevels: support.effortLevels,
             modelVariants: support.modelVariants === true,
             // OpenMausBot supplies a per-bot approvalMode on every harness
