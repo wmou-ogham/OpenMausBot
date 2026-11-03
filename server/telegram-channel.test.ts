@@ -6,7 +6,9 @@ describe("telegram voice replies", () => {
   it("tells the model to include the transcript", () => {
     const prompt = telegramChannelPrompt("bot-1");
     expect(prompt).toContain("回覆必須包含語音轉文字的結果");
-    expect(prompt).toContain("（語音轉譯）");
+    expect(prompt).toContain("15 秒以內的語音沒有現成逐字稿");
+    expect(prompt).toContain("超過 15 秒的訊息裡已有「語音轉譯」");
+    expect(prompt).not.toContain("12 秒");
     expect(prompt).not.toContain("不要自己轉譯");
   });
 
