@@ -256,9 +256,11 @@ import {
 } from "./store.ts";
 import * as tts from "./tts/index.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
-import { ANTIGRAVITY_CHECKPOINT_ERROR, antigravityAffinityForDispatch, noteTelegramThread } from "./drivers/antigravity-session.ts";
+import { ANTIGRAVITY_CHECKPOINT_ERROR, antigravityAffinityForDispatch, isTelegramThread, noteTelegramThread } from "./drivers/antigravity-session.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
+import { prepareInboundText } from "./inbound-attachments.ts";
+import { TELEGRAM_CHANNEL_PROMPT } from "./telegram-channel.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
@@ -6786,6 +6788,7 @@ async function startTurn(
         { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
         { id: "playbooks", label: "Playbooks", text: packagePlaybooks },
+        { id: "telegram", label: "Telegram", text: isTelegramThread(threadId) ? TELEGRAM_CHANNEL_PROMPT : "" },
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
         { id: "mentions", label: "Mentions", text: boundedCoordination && tagged.length ? `The user named these existing teammates: ${tagged.map(b => `${peerName(b.name)} (${b.id})`).join(", ")}. Use coordinate_bots when their contribution is needed; do not substitute native helper agents for these bots.` : mentionPrompt(tagged) },
       ]);
@@ -15565,8 +15568,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json(res, 400, { error: "body must be a JSON object" });
       }
-      const text = String(body.text ?? "").trim();
-      if (!text) return json(res, 400, { error: "text required" });
+      const rawText = String(body.text ?? "").trim();
+      if (!rawText) return json(res, 400, { error: "text required" });
+      // Voice is transcribed and documents are inlined before any turn starts,
+      // including a message that only gets queued behind a busy bot.
+      const prepared = await prepareInboundText(rawText);
+      const text = prepared.text;
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
       requirePinnedClientThread(bot.id, body.threadId);
@@ -15701,7 +15708,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId);
         },
       );
-      return json(res, 202, receipt);
+      return json(res, 202, { ...receipt, transcripts: prepared.transcripts });
     }
 
     m = path.match(/^\/api\/bots\/([\w-]+)\/queue\/([\w-]+)$/);
