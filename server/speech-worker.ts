@@ -110,7 +110,8 @@ function ensureWorker(): Promise<void> {
 
 export async function transcribeLocalAudio(filePath: string): Promise<string> {
   await ensureWorker();
-  if (!child) throw Object.assign(new Error("語音轉文字沒有在執行"), { status: 503 });
+  const stdin = child?.stdin;
+  if (!stdin) throw Object.assign(new Error("語音轉文字沒有在執行"), { status: 503 });
   const id = ++seq;
   return await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -118,7 +119,7 @@ export async function transcribeLocalAudio(filePath: string): Promise<string> {
       reject(Object.assign(new Error("語音轉文字超過 20 分鐘"), { status: 504 }));
     }, JOB_TIMEOUT_MS);
     pending.set(id, { resolve, reject, timer });
-    child!.stdin.write(`${JSON.stringify({ id, path: filePath })}\n`);
+    stdin.write(`${JSON.stringify({ id, path: filePath })}\n`);
   });
 }
 
