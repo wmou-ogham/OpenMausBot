@@ -72,6 +72,22 @@ describe("prepareInboundText", () => {
     expect(prepared.text).toBe(source);
   });
 
+  it("leaves telegram audio for the gateway instead of running Whisper", async () => {
+    const root = fixture();
+    const audio = join(root, "voice.ogg");
+    writeFileSync(audio, Buffer.from("ogg"));
+    const source = `<attached-file path="${audio}" name="voice.ogg" />`;
+    const prepared = await prepareInboundText(source, {
+      attachmentsDir: root,
+      transcribeAudio: false,
+      transcribe: async () => {
+        throw new Error("telegram voice is transcribed by the gateway");
+      },
+    });
+    expect(prepared.text).toBe(source);
+    expect(prepared.transcripts).toEqual([]);
+  });
+
   it("does not transcribe an example inside a code fence", async () => {
     const root = fixture();
     const audio = join(root, "voice.ogg");

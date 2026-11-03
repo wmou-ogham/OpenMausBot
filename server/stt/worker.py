@@ -2,7 +2,7 @@
 
 The model stays loaded so a second voice note does not pay the load cost again.
 large-v3 with no forced language is the accurate setting for Chinese-English
-technical speech. Speed is intentionally not tuned.
+technical speech. CPU threads follow the machine, leaving two cores free.
 """
 
 import json
@@ -22,6 +22,15 @@ os.makedirs(CACHE, exist_ok=True)
 MODEL_NAME = os.environ.get("OMB_STT_MODEL", "large-v3")
 DEVICE = os.environ.get("OMB_STT_DEVICE", "cpu")
 COMPUTE = os.environ.get("OMB_STT_COMPUTE", "int8")
+
+
+def cpu_threads():
+    """faster-whisper defaults to 4 CPU threads. Use the rest of this machine."""
+    raw = os.environ.get("OMB_STT_CPU_THREADS", "").strip()
+    if raw:
+        return max(1, int(raw))
+    count = os.cpu_count() or 4
+    return max(1, count - 2)
 PROMPT = os.environ.get(
     "OMB_STT_PROMPT",
     "中文與 English 夾雜的技術對話，保留 API、timeout、path、token、函式名稱。",
@@ -34,8 +43,21 @@ def emit(payload):
 
 
 def main():
-    model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE, download_root=CACHE)
-    emit({"ready": True, "model": MODEL_NAME, "device": DEVICE, "compute": COMPUTE})
+    threads = cpu_threads()
+    model = WhisperModel(
+        MODEL_NAME,
+        device=DEVICE,
+        compute_type=COMPUTE,
+        cpu_threads=threads,
+        download_root=CACHE,
+    )
+    emit({
+        "ready": True,
+        "model": MODEL_NAME,
+        "device": DEVICE,
+        "compute": COMPUTE,
+        "cpu_threads": threads,
+    })
     for line in sys.stdin:
         line = line.strip()
         if not line:
