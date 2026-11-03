@@ -256,7 +256,7 @@ import {
 } from "./store.ts";
 import * as tts from "./tts/index.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
-import { antigravityAffinityForDispatch, noteTelegramThread } from "./drivers/antigravity-session.ts";
+import { ANTIGRAVITY_CHECKPOINT_ERROR, antigravityAffinityForDispatch, noteTelegramThread } from "./drivers/antigravity-session.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { extractTurnImages } from "./turn-images.ts";
@@ -3980,6 +3980,61 @@ function publishAntigravityUsageLimit(event: RuntimeEvent, notice: string): void
   bus.publish({ ...stamped, eventId: newId(), type: "turn.completed", ok: true, stopReason: null, cost: null });
 }
 
+const antigravityCheckpointRetrying = new Set<string>();
+
+/** The checkpoint reply is not an answer. One fresh session gets the same
+ * user message; the stored cursor stays so that launch still has recovery
+ * text, and the poisoned flag is what makes the driver refuse the resume.
+ * A second death in that retry is the reply, not another loop. */
+function retryAntigravityAfterCheckpoint(bot: BotRecord, event: RuntimeEvent): boolean {
+  if (antigravityCheckpointRetrying.has(event.threadId)) {
+    antigravityCheckpointRetrying.delete(event.threadId);
+    console.error(`[antigravity-session] thread=${event.threadId} checkpoint again after a fresh session`);
+    publishAntigravityCheckpointFailure(event);
+    return false;
+  }
+  const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
+    message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
+  if (!user?.text) {
+    publishAntigravityCheckpointFailure(event);
+    return false;
+  }
+  antigravityCheckpointRetrying.add(event.threadId);
+  const run = activeRoutineRunForThread(event.threadId);
+  console.error(`[antigravity-session] thread=${event.threadId} checkpoint; opening a fresh session`);
+  stopScreenPoller(bot.id, event.threadId);
+  void startTurn(bot.id, user.text, {
+    threadId: event.threadId,
+    userMessage: user,
+    replacingTurn: true,
+    ...(run ? {
+      runOn: run.runOn,
+      automationSource: run.triggerSource ?? (run.manual ? "manual" : "schedule"),
+      unattended: true,
+    } : {}),
+  }).catch((error) => {
+    antigravityCheckpointRetrying.delete(event.threadId);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[antigravity-session] thread=${event.threadId} fresh session failed: ${message}`);
+    publishAntigravityCheckpointFailure(event, message);
+  });
+  return true;
+}
+
+function publishAntigravityCheckpointFailure(event: RuntimeEvent, detail?: string): void {
+  const text = detail?.trim() || `Agent execution error: ${ANTIGRAVITY_CHECKPOINT_ERROR}`;
+  const turnId = event.turnId ?? newId();
+  const stamped = {
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    threadId: event.threadId,
+    turnId,
+    createdAt: new Date().toISOString(),
+  };
+  bus.publish({ ...stamped, eventId: newId(), type: "item.completed", itemType: "assistant_text", text });
+  bus.publish({ ...stamped, eventId: newId(), type: "turn.completed", ok: false, stopReason: "checkpoint", cost: null });
+}
+
 function switchAntigravityAfterUsageLimit(bot: BotRecord, event: RuntimeEvent): void {
   const blockedId = event.providerInstanceId ?? runningTurnEngines.get(event.threadId)?.instanceId;
   const notice = antigravityReplyNotice(event.threadId) ?? "";
@@ -4634,6 +4689,16 @@ bus.subscribe((event: RuntimeEvent) => {
         else publishAntigravityUsageLimit(event, antigravityReplyNotice(event.threadId) ?? "");
         break;
       }
+      if (event.reason === "antigravity_checkpoint") {
+        if (bot && retryAntigravityAfterCheckpoint(bot, event)) {
+          pushMessage({
+            role: "bot",
+            kind: "activity",
+            tool: { name: "opening a fresh Antigravity session — checkpoint error", ok: true },
+          });
+        } else if (!bot) publishAntigravityCheckpointFailure(event);
+        break;
+      }
       // the driver is about to relaunch the turn after a transient failure;
       // the activity chip keeps the bot visibly busy through the backoff
       pushMessage({
@@ -4663,6 +4728,7 @@ bus.subscribe((event: RuntimeEvent) => {
       }
       break;
     case "turn.completed": {
+      antigravityCheckpointRetrying.delete(event.threadId);
       // A peer-started turn settles as coordination, not as news. What keeps
       // that classification from outliving its turn is the rewrite at
       // dispatch, not this line — releasing it here too is hygiene, so a

@@ -7,7 +7,9 @@
 // checkpoint (~100k tokens), the thread has been idle 20 minutes, the
 // session already died with "could not find doneCh for checkpoint", or the
 // user asks for a new one (/new, /break, /session). A forced new session
-// replays only the latest 20 turns.
+// replays only the latest 20 turns. When that checkpoint error is the
+// reply, the host reruns the same turn on a fresh session; a second death
+// in that retry is shown instead of looping.
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";

@@ -35,8 +35,10 @@ import {
   rememberAntigravityReplyNotice,
 } from "../antigravity-pool.ts";
 import {
+  ANTIGRAVITY_CHECKPOINT_ERROR,
   antigravityNoteAssistantText,
   antigravityNoteObserved,
+  antigravityNotePoison,
   antigravityNoteUsage,
   antigravityPromptText,
   antigravityResumeDecision,
@@ -94,9 +96,16 @@ const support: AcpSupport = {
   noteObserved: antigravityNoteObserved,
   noteAssistantDelta: antigravityNoteAssistantText,
   abandonAssistantText: (threadId, text) => {
+    // noteUsage(0) on this same turn clears a poison recorded while the
+    // text was streaming. Put it back after that report, or the retry
+    // resumes the session whose checkpoint channel is already gone.
+    if (text.includes(ANTIGRAVITY_CHECKPOINT_ERROR)) {
+      antigravityNotePoison(threadId);
+      return "antigravity_checkpoint";
+    }
     if (!antigravityReplyNeedsAccountSwitch(text)) return false;
     rememberAntigravityReplyNotice(threadId, text);
-    return true;
+    return "antigravity_quota";
   },
   buildPromptText: (turn, ctx) => antigravityPromptText(turn, ctx),
   clientFileSystem: true,

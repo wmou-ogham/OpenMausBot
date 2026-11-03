@@ -209,6 +209,17 @@ describe("antigravity sticky session", () => {
     });
   });
 
+  it("keeps a checkpoint poison when a zero usage report cleared the streamed mark", () => {
+    antigravityNoteAssistantText("t", `Agent execution error: ${ANTIGRAVITY_CHECKPOINT_ERROR}`, "");
+    antigravityNoteUsage("t", 0);
+    expect(antigravityResumeDecision({ threadId: "t", antigravityAffinity: { inputTokens: 1 } }).resume).toBe(true);
+    antigravityNoteAssistantText("t", "", ANTIGRAVITY_CHECKPOINT_ERROR);
+    expect(antigravityResumeDecision({ threadId: "t", antigravityAffinity: { inputTokens: 1 } })).toEqual({
+      resume: false,
+      reason: "checkpoint",
+    });
+  });
+
   it("does not read or write the live session file when vitest has no override", () => {
     delete process.env.OMB_ANTIGRAVITY_STATE_PATH;
     antigravityCloseStateForTests();
@@ -356,17 +367,27 @@ describe("antigravity sticky session through the ACP driver", () => {
     expect(opened).toContain("User: line 6");
     expect(opened).not.toContain("User: line 5\n");
 
-    await send(instance, {
-      threadId: "poison-me",
-      text: `please note ${ANTIGRAVITY_CHECKPOINT_ERROR}`,
-      system: "You are Moriss.",
-      approvalMode: "ask",
-      model: "gemini-3.8-flash-low",
-      resumeCursor: "prior-session",
-      antigravityAffinity: { inputTokens: 10, gapMs: 1_000 },
-      cwd: fake.directory,
-    });
+    {
+      const recorder = recordEvents(instance.adapter);
+      const { turnId } = await instance.adapter.sendTurn({
+        threadId: "poison-me",
+        text: `please note ${ANTIGRAVITY_CHECKPOINT_ERROR}`,
+        system: "You are Moriss.",
+        approvalMode: "ask",
+        model: "gemini-3.8-flash-low",
+        resumeCursor: "prior-session",
+        antigravityAffinity: { inputTokens: 10, gapMs: 1_000 },
+        cwd: fake.directory,
+      });
+      const retry = await recorder.until((event) => event.type === "turn.retrying" && event.turnId === turnId);
+      expect(retry).toMatchObject({ reason: "antigravity_checkpoint", attempt: 1, delayMs: 0 });
+      expect(recorder.events.some((event) => event.type === "turn.completed" || event.type === "item.completed")).toBe(false);
+    }
     expect(sessionId(dump)).toBe("prior-session");
+    expect(antigravityResumeDecision({ threadId: "poison-me", antigravityAffinity: { inputTokens: 10 } })).toEqual({
+      resume: false,
+      reason: "checkpoint",
+    });
     await send(instance, {
       threadId: "poison-me",
       text: "again",

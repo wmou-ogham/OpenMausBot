@@ -167,10 +167,10 @@ export interface AcpSupport {
   noteObserved?(threadId: string, chars: number): void;
   /** Assistant text as it streams, so a harness can count it and spot a dead session. */
   noteAssistantDelta?(threadId: string, delta: string, accumulated: string): void;
-  /** The finished assistant text is an account limit, not an answer. Return
-   * true to drop it and emit `turn.retrying` so the host can run the same
-   * turn on another account. A false result settles the turn normally. */
-  abandonAssistantText?(threadId: string, text: string): boolean;
+  /** The finished assistant text is not an answer. Return a `turn.retrying`
+   * reason, or true for the historical quota reason, to drop it so the host
+   * can run the same turn again. A false result settles the turn normally. */
+  abandonAssistantText?(threadId: string, text: string): boolean | string;
   /** Rewrite a picker id (`omlx::model`) into the CLI-native id before spawn
    * and session/select. Local inject writers live here so the child sees a
    * model it already knows. */
@@ -704,6 +704,35 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           stop(); // the agent process does not exit on its own
         };
 
+        const retryReasonFor = (text: string): string | false => {
+          const verdict = support.abandonAssistantText?.(threadId, text);
+          if (!verdict) return false;
+          return typeof verdict === "string" ? verdict : "antigravity_quota";
+        };
+
+        /** Drop the reply without settling. The host sees turn.retrying and
+         * decides whether to run this same turn again. */
+        const abandonTurn = (retryReason: string) => {
+          state.text = "";
+          state.settled = true;
+          if (interruptTimer) clearTimeout(interruptTimer);
+          for (const finish of asks.values()) finish("cancel", "system");
+          for (const pending of rpcPending.values()) {
+            if (pending.timer) clearTimeout(pending.timer);
+            pending.reject(new Error("turn settled"));
+          }
+          rpcPending.clear();
+          active.delete(threadId);
+          emit({
+            ...base(threadId, turnId),
+            type: "turn.retrying",
+            attempt: 1,
+            delayMs: 0,
+            reason: retryReason,
+          });
+          stop();
+        };
+
         // server→client permission request → canonical request.opened
         const handleServerRequest = (msg: any) => {
           if (msg.method === "fs/read_text_file" || msg.method === "fs/write_text_file") {
@@ -1143,25 +1172,17 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               });
             }
             const reason = result?.stopReason;
-            if (reason !== "cancelled" && support.abandonAssistantText?.(threadId, state.text)) {
-              state.text = "";
-              state.settled = true;
-              if (interruptTimer) clearTimeout(interruptTimer);
-              for (const finish of asks.values()) finish("cancel", "system");
-              for (const pending of rpcPending.values()) {
-                if (pending.timer) clearTimeout(pending.timer);
-                pending.reject(new Error("turn settled"));
-              }
-              rpcPending.clear();
-              active.delete(threadId);
-              emit({
-                ...base(threadId, turnId),
-                type: "turn.retrying",
-                attempt: 1,
-                delayMs: 0,
-                reason: "antigravity_quota",
-              });
-              stop();
+            const promptFailure = reason === "end_turn" || reason === "cancelled"
+              ? ""
+              : typeof result?.error === "string" && result.error
+                ? result.error
+                : typeof result?.message === "string" && result.message
+                  ? result.message
+                  : "";
+            const watched = [state.text, promptFailure].filter((part) => part.length > 0).join("\n");
+            const retryReason = reason === "cancelled" ? false : retryReasonFor(watched);
+            if (retryReason) {
+              abandonTurn(retryReason);
               return;
             }
             if (reason === "end_turn") settle(true, null);
@@ -1182,6 +1203,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           } catch (e) {
             if (!state.settled) {
               const message = e instanceof Error ? e.message : String(e);
+              const retryReason = retryReasonFor(`${state.text}\n${message}`);
+              if (retryReason) {
+                abandonTurn(retryReason);
+                return;
+              }
               const code = support.classifyError?.(e);
               // Authentication setup is a user action, not a retry. The
               // classifier is preferred; loginNote remains a compatibility
