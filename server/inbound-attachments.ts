@@ -21,6 +21,8 @@ export interface InboundPreparation {
 
 export interface InboundDeps {
   attachmentsDir?: string;
+  /** Telegram voice is transcribed by the gateway. Skip Whisper for that origin. */
+  transcribeAudio?: boolean;
   transcribe?: (filePath: string) => Promise<string>;
   extractDocument?: (filePath: string) => Promise<string>;
 }
@@ -75,6 +77,7 @@ function readTextFile(filePath: string): string {
 export async function prepareInboundText(text: string, deps: InboundDeps = {}): Promise<InboundPreparation> {
   if (!text.includes("<attached-file")) return { text, transcripts: [] };
   const attachmentsDir = deps.attachmentsDir ?? ATTACHMENTS_DIR;
+  const transcribeAudio = deps.transcribeAudio !== false;
   const transcribe = deps.transcribe ?? transcribeLocalAudio;
   const extractDocument = deps.extractDocument ?? extractDocumentText;
   const transcripts: string[] = [];
@@ -105,6 +108,10 @@ export async function prepareInboundText(text: string, deps: InboundDeps = {}): 
     const ext = extname(owned).toLowerCase();
     const display = decodeAttribute(match[2] ?? "") || owned.split("/").at(-1) || "附件";
     if (AUDIO_EXT.has(ext)) {
+      if (!transcribeAudio) {
+        out.push(line);
+        continue;
+      }
       let transcript = "";
       try {
         transcript = (await transcribe(owned)).trim();

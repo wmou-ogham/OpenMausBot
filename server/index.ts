@@ -15570,9 +15570,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const rawText = String(body.text ?? "").trim();
       if (!rawText) return json(res, 400, { error: "text required" });
-      // Voice is transcribed and documents are inlined before any turn starts,
+      // Telegram voice is already text from the gateway. Other audio is
+      // transcribed here, and documents are inlined, before any turn starts,
       // including a message that only gets queued behind a busy bot.
-      const prepared = await prepareInboundText(rawText);
+      const prepared = await prepareInboundText(rawText, {
+        transcribeAudio: body.origin !== "telegram",
+      });
       const text = prepared.text;
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
