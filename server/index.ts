@@ -260,7 +260,7 @@ import { ANTIGRAVITY_CHECKPOINT_ERROR, antigravityAffinityForDispatch, isTelegra
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { prepareInboundText } from "./inbound-attachments.ts";
-import { telegramChannelPrompt } from "./telegram-channel.ts";
+import { telegramChannelPrompt, withTelegramVoiceReplyNote } from "./telegram-channel.ts";
 import { extractTurnAudio } from "./turn-audio.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
@@ -6071,11 +6071,11 @@ async function startTurn(
   // which also depends on the bot's soul/description — is decided below,
   // from the same bot snapshot the prompt's soul is built from.
   const setupText = agentsMounted ? expandSetupTurnText(providerText) : providerText;
-  const userTurnText = promptWithReply(
+  const userTurnText = withTelegramVoiceReplyNote(promptWithReply(
     skillAuthoring ? expandLearnTurnText(setupText) : setupText,
     opts?.replyTo,
     cfg.profile?.name?.trim() || "User",
-  );
+  ), { telegram: isTelegramThread(threadId), audioCount: turnAudio.length });
   // Decided again at dispatch when setup outlasted a soul edit (config).
   const decideContext = (config: string) => {
     const handedStale = Boolean(handed && (!unseen || (externalUpdate && handed.config !== config)));
