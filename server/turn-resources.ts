@@ -39,6 +39,35 @@ export class TurnResources {
   releaseOne(resource: string, owner: TurnOwner): void {
     if (this.owns(resource, owner)) this.owners.delete(resource);
   }
+
+  /** The same thread is starting the turn again (a checkpoint or quota
+   * retry). The abandoned generation never publishes turn.completed, so
+   * its claims have to move onto the replacement or they block this
+   * thread's folder until the process restarts. A different thread is
+   * never adopted. */
+  reassign(from: TurnOwner, to: TurnOwner): void {
+    if (from.threadId !== to.threadId || sameOwner(from, to)) return;
+    for (const [key, current] of this.owners) {
+      if (sameOwner(current, from)) this.owners.set(key, to);
+    }
+  }
+}
+
+/** Move every claim the abandoned generation still holds onto the
+ * replacement, before that replacement is recorded as the thread's owner.
+ * A stale turn.completed for the abandoned generation then releases
+ * nothing. */
+export function adoptTurnResources(resources: TurnResources, from: TurnOwner | undefined, to: TurnOwner): void {
+  if (!from) return;
+  resources.reassign(from, to);
+}
+
+/** Side tables that remember an owner by thread must follow the same
+ * adoption, or a later release of the replacement leaves the old
+ * generation's computer slot behind. */
+export function retargetTurnOwner<T extends { owner: TurnOwner }>(slot: T | undefined, from: TurnOwner, to: TurnOwner): T | undefined {
+  if (!slot || !sameOwner(slot.owner, from)) return slot;
+  return { ...slot, owner: to };
 }
 
 function sameOwner(a: TurnOwner, b: TurnOwner): boolean {

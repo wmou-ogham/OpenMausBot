@@ -14,8 +14,50 @@ export interface SseFanoutClient {
     end(): void;
     writableLength: number;
     once(event: "drain", listener: () => void): unknown;
+    writableEnded?: boolean;
+    destroyed?: boolean;
+    closed?: boolean;
   };
   backpressured: boolean;
+}
+
+/** A finished response must not be written again. Node reports that write
+ * as an asynchronous `error` on the response, and with no listener the
+ * process exits. */
+export function sseResponseEnded(res: { writableEnded?: boolean; destroyed?: boolean; closed?: boolean }): boolean {
+  return Boolean(res.writableEnded || res.destroyed || res.closed);
+}
+
+/** One listener for the response's own close and for the async write-after-end
+ * error. `onAbort` runs at most once. */
+export function attachSseAbort(
+  res: { on(event: "error" | "close", listener: () => void): void },
+  onAbort: () => void,
+): void {
+  let aborted = false;
+  const abort = () => {
+    if (aborted) return;
+    aborted = true;
+    onAbort();
+  };
+  res.on("error", abort);
+  res.on("close", abort);
+}
+
+/** Write one SSE chunk, or report that the response is already gone.
+ * A synchronous throw is a disconnect. The async `error` event is the
+ * caller's `attachSseAbort` listener, not an uncaught exception. */
+export function writeSse(
+  res: { write(chunk: string): boolean; writableEnded?: boolean; destroyed?: boolean; closed?: boolean },
+  chunk: string,
+): boolean {
+  if (sseResponseEnded(res)) return false;
+  try {
+    res.write(chunk);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Past this many buffered bytes, the client isn't draining on any useful
@@ -38,6 +80,7 @@ export type SseFanoutOutcome = "sent" | "dropped" | "disconnected";
  * disconnects the client outright so its next reconnect replays what it
  * missed instead of silently losing it. */
 export function deliverSseFrame(client: SseFanoutClient, kind: string, frame: string): SseFanoutOutcome {
+  if (sseResponseEnded(client.res)) return "disconnected";
   if (client.res.writableLength > SSE_MAX_BUFFERED_BYTES) {
     try {
       client.res.end();
