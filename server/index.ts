@@ -264,7 +264,7 @@ import { telegramChannelPrompt, withTelegramVoiceReplyNote } from "./telegram-ch
 import { extractTurnAudio } from "./turn-audio.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
-import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
+import { adoptTurnResources, retargetTurnOwner, TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
 import {
   ensureWorkspace,
   ensureTaskWorkspace,
@@ -438,7 +438,7 @@ import {
 } from "./request-auth.ts";
 import { cookieMaxAgeSeconds, formatPairingCode, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
-import { deliverSseFrame } from "./sse-fanout.ts";
+import { attachSseAbort, deliverSseFrame, sseResponseEnded, writeSse } from "./sse-fanout.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
   PhoneSecretBridge,
@@ -6140,6 +6140,22 @@ async function startTurn(
   // hang the HTTP request
   const dispatchClaimId = randomUUID();
   const resourceOwner = { threadId, generation: dispatchClaimId };
+  // A checkpoint or quota retry abandons the provider turn without
+  // turn.completed. That generation still holds this thread's folder.
+  // Adopt those claims before recording the replacement, or the new claim
+  // fails and every later message on this thread stays blocked until restart.
+  if (opts?.replacingTurn) {
+    const previous = turnResourceOwners.get(threadId);
+    if (previous && previous.generation !== resourceOwner.generation) {
+      adoptTurnResources(turnResources, previous, resourceOwner);
+      const computer = retargetTurnOwner(turnComputerResources.get(threadId), previous, resourceOwner);
+      if (computer) turnComputerResources.set(threadId, computer);
+      const team = retargetTurnOwner(teamComputerTurns.get(threadId), previous, resourceOwner);
+      if (team) teamComputerTurns.set(threadId, team);
+      const autoVm = retargetTurnOwner(autoVmClaims.get(threadId), previous, resourceOwner);
+      if (autoVm) autoVmClaims.set(threadId, autoVm);
+    }
+  }
   turnResourceOwners.set(threadId, resourceOwner);
   directTurnGenerationByThread.set(threadId, dispatchClaimId);
   if (opts?.coordination) directCoordinationSettlers.set(dispatchClaimId, opts.coordination.settle);
@@ -13218,20 +13234,35 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // A comment keeps intermediaries from idling the connection, while a
       // data frame is visible to EventSource clients and resets their own
       // liveness watchdog. Heartbeats carry no id and never advance replay.
-      const keepalive = setInterval(() => {
-        // an expired session's stream ends at the next heartbeat
-        if (client.sessionId && !sessions.isLive(client.sessionId)) {
-          res.end();
+      // write() after the client is gone does not throw: it emits `error`
+      // on the next turn, and an unhandled error event exits the process,
+      // taking every in-flight reply with it. The listener below is what
+      // keeps that write from being fatal. The interval also stops itself
+      // once the response has ended, including the session-expiry path,
+      // which used to end the response and then write the next heartbeat.
+      let stopped = false;
+      let keepalive: ReturnType<typeof setInterval> | undefined;
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        if (keepalive) clearInterval(keepalive);
+        sseClients.delete(client);
+      };
+      attachSseAbort(res, stop);
+      req.on("close", stop);
+      keepalive = setInterval(() => {
+        if (stopped || sseResponseEnded(res)) {
+          stop();
           return;
         }
-        try {
-          res.write(`: keepalive\n\ndata: ${JSON.stringify({ kind: "ping" })}\n\n`);
-        } catch {}
+        // an expired session's stream ends at the next heartbeat
+        if (client.sessionId && !sessions.isLive(client.sessionId)) {
+          stop();
+          try { res.end(); } catch { /* already gone */ }
+          return;
+        }
+        if (!writeSse(res, `: keepalive\n\ndata: ${JSON.stringify({ kind: "ping" })}\n\n`)) stop();
       }, SSE_HEARTBEAT_MS);
-      req.on("close", () => {
-        clearInterval(keepalive);
-        sseClients.delete(client);
-      });
       return;
     }
 

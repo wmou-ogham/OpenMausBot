@@ -2,9 +2,11 @@
 // response object directly instead of the real HTTP harness index.test.ts
 // uses elsewhere: index.ts starts a real server on import, so it can't be
 // imported into a unit test, which is why this logic lives in its own file.
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 
-import { deliverSseFrame, SSE_MAX_BUFFERED_BYTES, type SseFanoutClient } from "./sse-fanout.ts";
+import { attachSseAbort, deliverSseFrame, SSE_MAX_BUFFERED_BYTES, writeSse, type SseFanoutClient } from "./sse-fanout.ts";
 
 /** A fake client plus a handle on the drain listeners it queued. */
 type TestClient = SseFanoutClient & { drains: (() => void)[] };
@@ -112,5 +114,50 @@ describe("deliverSseFrame", () => {
       },
     });
     expect(deliverSseFrame(client, "message", "message-1")).toBe("disconnected");
+  });
+
+  it("drops a frame when the response has already ended", () => {
+    const client = fakeClient({ writableEnded: true });
+    expect(deliverSseFrame(client, "message", "message-1")).toBe("disconnected");
+  });
+});
+
+describe("SSE response errors", () => {
+  it("does not leave a write after the client disconnects unhandled", async () => {
+    const unhandled: Error[] = [];
+    const onUnhandled = (error: Error) => { unhandled.push(error); };
+    process.on("uncaughtException", onUnhandled);
+    let aborted = false;
+    const server = createServer((req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      attachSseAbort(res, () => { aborted = true; });
+      writeSse(res, "data: hello\n\n");
+      req.on("close", () => {
+        setTimeout(() => {
+          // The response is finished. A bare res.write() here emits `error`
+          // asynchronously; the abort listener has to absorb it.
+          res.write("data: late\n\n");
+          writeSse(res, "data: guarded\n\n");
+        }, 20);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      await new Promise<void>((resolve, reject) => {
+        const req = fetch(`http://127.0.0.1:${port}/`).then(async (response) => {
+          const reader = response.body?.getReader();
+          const first = await reader?.read();
+          expect(first?.value?.byteLength).toBeGreaterThan(0);
+          await reader?.cancel();
+        });
+        req.then(() => setTimeout(resolve, 80)).catch(reject);
+      });
+      expect(aborted).toBe(true);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUnhandled);
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 });
