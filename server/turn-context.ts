@@ -32,6 +32,26 @@ export interface TurnContextInput {
  * anything else is ambiguous, and replaying is the safe side of ambiguous.
  * Gated on a prior USER turn: a new bot's thread is seeded with its own
  * greeting, and that alone is nothing to join. */
+/** The model the user had selected when this conversation last took a turn.
+ * Effort and account routing are not part of it: only a different engine or
+ * model id counts as switching models. */
+export interface DispatchedModel {
+  instanceId: string;
+  model: string;
+}
+
+/** A model change must not also move "where this conversation works".
+ * True only when a previous turn recorded a selection and this turn's
+ * selection names a different engine or model. The first turn has no
+ * previous record, so it can still choose a place. */
+export function modelSwitchLocksConversationPlace(
+  previous: DispatchedModel | undefined,
+  next: DispatchedModel,
+): boolean {
+  if (!previous) return false;
+  return previous.instanceId !== next.instanceId || previous.model !== next.model;
+}
+
 export function engineIsFresh(input: {
   instanceId: string;
   lastInstanceId: string | undefined;

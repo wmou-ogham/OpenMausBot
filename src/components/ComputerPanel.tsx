@@ -118,7 +118,7 @@ type Phase =
 
 interface LocalVmStatus {
   mode: "shared" | "per-bot";
-  max_instances: number;
+  max_instances: number | null;
   image: boolean;
   create_supported: boolean;
   container: "running" | "stopped" | "missing";

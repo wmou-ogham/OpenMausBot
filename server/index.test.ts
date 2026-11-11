@@ -7337,12 +7337,20 @@ describe("harness HTTP API", () => {
     }
     expect(JSON.stringify(inventoryBody)).not.toMatch(/viewer_url|workspace_path|container_name|target_key/);
 
-    const invalid = await api("PATCH", "/api/config", { localVm: { maxInstances: 5 } });
+    const raised = await api("PATCH", "/api/config", { localVm: { maxInstances: 5 } });
+    expect(raised.status).toBe(200);
+    expect(raised.body.localVm).toEqual({ mode: "per-bot", maxInstances: 5 });
+
+    const unlimited = await api("PATCH", "/api/config", { localVm: { maxInstances: null } });
+    expect(unlimited.status).toBe(200);
+    expect(unlimited.body.localVm).toEqual({ mode: "per-bot", maxInstances: null });
+
+    const invalid = await api("PATCH", "/api/config", { localVm: { maxInstances: 0 } });
     expect(invalid.status).toBe(400);
     expect(invalid.body.error).toContain("localVm.maxInstances");
 
     const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
-    expect(disk.localVm).toEqual({ mode: "per-bot", maxInstances: 3 });
+    expect(disk.localVm).toEqual({ mode: "per-bot", maxInstances: null });
     await api("PATCH", "/api/config", { localVm: { mode: "shared", maxInstances: 2 } });
   });
 

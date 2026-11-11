@@ -499,7 +499,7 @@ export interface ConfigStatus {
   vps: { configured: boolean; sshAlias: string };
   rooms: { turnTimeoutMinutes: number };
   threads?: { maxConcurrentPerBot: number };
-  localVm: { mode: "shared" | "per-bot"; maxInstances: number };
+  localVm: { mode: "shared" | "per-bot"; maxInstances: number | null };
   opencodeGo?: { configured: boolean };
   /** Voice. `configured` = the engine has what it needs (an ElevenLabs or
    * Fish Audio key, or a Chatterbox server address); `ready` = that AND a voice, which is

@@ -11,7 +11,7 @@ export type LocalVmWorkspaceSlots = [string | null, string | null];
 
 export interface LocalVmWorkspaceStatus {
   mode: "shared" | "per-bot" | "unknown";
-  maxInstances: number;
+  maxInstances: number | null;
   container: "running" | "stopped" | "missing" | "unknown";
   network: "loopback" | "unsafe" | "unknown";
   security: "hardened" | "unsafe" | "unknown";
@@ -197,7 +197,7 @@ export function reconcileLocalVmWorkspaceSlots(
 
 const localVmStatusPayloadSchema = z.object({
   mode: z.enum(["shared", "per-bot"]).optional(),
-  max_instances: z.number().int().positive().optional(),
+  max_instances: z.number().int().positive().nullable().optional(),
   container: z.enum(["running", "stopped", "missing"]).optional(),
   network: z.enum(["loopback", "unsafe", "unknown"]).optional(),
   security: z.enum(["hardened", "unsafe", "unknown"]).optional(),
@@ -224,7 +224,7 @@ export function sanitizeLocalVmWorkspaceStatus(raw: JsonValue): LocalVmWorkspace
   const network = value?.network ?? "unknown";
   const security = value?.security ?? "unknown";
   const persistence = value?.persistence ?? "unknown";
-  const maxInstances = value?.max_instances ?? 0;
+  const maxInstances = !value || value.max_instances === undefined ? 0 : value.max_instances;
   const desktopReady = value?.desktopReady === true;
   const ready = Boolean(
     value?.ready === true &&

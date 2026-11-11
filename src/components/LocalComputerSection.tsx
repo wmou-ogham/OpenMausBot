@@ -45,7 +45,7 @@ interface Status {
   viewer_url: string;
   idle_timeout_ms: number;
   mode: "shared" | "per-bot";
-  max_instances: number;
+  max_instances: number | null;
   commands: {
     install: string | null;
     runtimeStart: string | null;
@@ -71,7 +71,7 @@ export interface LocalVmInventoryInstance {
 
 interface LocalVmInventoryPayload {
   instances: LocalVmInventoryInstance[];
-  maxInstances: number;
+  maxInstances: number | null;
   available: boolean;
   problem: string | null;
 }
@@ -643,7 +643,7 @@ export function LocalVmInventoryCard({
   onDelete,
 }: {
   instances: LocalVmInventoryInstance[];
-  maxInstances: number;
+  maxInstances: number | null;
   loading: boolean;
   deletingBotId: string | null;
   error: string | null;
@@ -657,7 +657,9 @@ export function LocalVmInventoryCard({
       subtitle={t("vm.perBot.subtitle", {
         count: unavailableReason
           ? t("vm.perBot.inventoryUnavailable")
-          : t("vm.perBot.created", { count: instances.length, max: maxInstances }),
+          : maxInstances == null
+            ? t("vm.perBot.createdOpen", { count: instances.length })
+            : t("vm.perBot.created", { count: instances.length, max: maxInstances }),
       })}
     >
       <div className="flex items-center justify-between gap-3">
@@ -824,7 +826,11 @@ export function LocalComputerSection() {
   const [policyPending, setPolicyPending] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [inventory, setInventory] = useState<LocalVmInventoryInstance[]>([]);
-  const [inventoryMax, setInventoryMax] = useState(2);
+  const [inventoryMax, setInventoryMax] = useState<number | null | undefined>(undefined);
+  const [maxDraft, setMaxDraft] = useState("");
+  useEffect(() => {
+    setMaxDraft(status?.max_instances == null ? "" : String(status.max_instances));
+  }, [status?.max_instances]);
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [inventoryError, setInventoryError] = useState<string | null>(null);
   const [inventoryUnavailableReason, setInventoryUnavailableReason] = useState<string | null>(null);
@@ -1044,7 +1050,7 @@ export function LocalComputerSection() {
     }
   };
 
-  const savePolicy = async (mode: Status["mode"], maxInstances: number) => {
+  const savePolicy = async (mode: Status["mode"], maxInstances: number | null) => {
     setPolicyPending(true);
     setError(null);
     try {
@@ -1312,7 +1318,10 @@ export function LocalComputerSection() {
               key={mode}
               type="button"
               disabled={!status || policyPending}
-              onClick={() => void savePolicy(mode, status?.max_instances ?? 2)}
+              onClick={() => {
+                if (!status) return;
+                void savePolicy(mode, status.max_instances);
+              }}
               className={cn(
                 "flex-1 px-3 py-2 text-[13px] disabled:opacity-50",
                 index > 0 && "border-l border-hairline/40",
@@ -1328,15 +1337,44 @@ export function LocalComputerSection() {
             <div className="text-[13px] text-ink">{t("vm.isolation.max")}</div>
             <div className="text-[11.5px] text-ink-secondary">{t("vm.isolation.maxDetail")}</div>
           </div>
-          <select
-            aria-label={t("vm.isolation.maxAria")}
-            value={status?.max_instances ?? 2}
-            disabled={!status || policyPending}
-            onChange={(event) => void savePolicy(status?.mode ?? "shared", Number(event.target.value))}
-            className="rounded-lg border border-hairline/40 bg-control px-2.5 py-1.5 text-[13px] text-ink disabled:opacity-50"
-          >
-            {[1, 2, 3, 4].map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              step={1}
+              inputMode="numeric"
+              aria-label={t("vm.isolation.maxAria")}
+              value={maxDraft}
+              disabled={!status || policyPending || status.max_instances == null}
+              onChange={(event) => setMaxDraft(event.target.value)}
+              onBlur={() => {
+                if (!status || status.max_instances == null) return;
+                const value = Number(maxDraft);
+                if (!Number.isInteger(value) || value < 1) {
+                  setMaxDraft(String(status.max_instances));
+                  return;
+                }
+                if (value !== status.max_instances) void savePolicy(status.mode, value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+              className="w-20 rounded-lg border border-hairline/40 bg-control px-2.5 py-1.5 text-[13px] text-ink disabled:opacity-50"
+            />
+            <label className="flex items-center gap-1.5 text-[12.5px] text-ink-secondary">
+              <input
+                type="checkbox"
+                aria-label={t("vm.isolation.noLimitAria")}
+                checked={status != null && status.max_instances == null}
+                disabled={!status || policyPending}
+                onChange={() => {
+                  if (!status) return;
+                  void savePolicy(status.mode, status.max_instances == null ? 2 : null);
+                }}
+              />
+              {t("vm.isolation.noLimit")}
+            </label>
+          </div>
         </div>
         {policyPending && <div className="mt-2 flex items-center gap-1.5 text-[12px] text-ink-secondary"><Loader2 size={12} className="animate-spin" /> {t("vm.saving")}</div>}
       </Card>
@@ -1425,7 +1463,7 @@ export function LocalComputerSection() {
       {perBot && (
         <LocalVmInventoryCard
           instances={inventory}
-          maxInstances={inventoryMax || status?.max_instances || 2}
+          maxInstances={inventoryMax !== undefined ? inventoryMax : (status?.max_instances ?? 2)}
           loading={inventoryLoading}
           deletingBotId={deletingBotId}
           error={inventoryError}

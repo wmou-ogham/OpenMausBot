@@ -214,6 +214,12 @@ describe("Local VM workspace status", () => {
     expect(status).not.toHaveProperty("problem");
   });
 
+  it("keeps an unlimited desktop cap without dropping the rest of the status", () => {
+    const status = sanitizeLocalVmWorkspaceStatus({ ...ready, max_instances: null });
+    expect(status.maxInstances).toBeNull();
+    expect(status.ready).toBe(true);
+  });
+
   it("fails closed when any required readiness guard is unsafe", () => {
     expect(sanitizeLocalVmWorkspaceStatus({ ...ready, network: "unsafe" }).ready).toBe(false);
     expect(sanitizeLocalVmWorkspaceStatus({ ...ready, desktopReady: false }).ready).toBe(false);
