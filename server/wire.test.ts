@@ -39,6 +39,7 @@ const fullTask: TaskRecord = {
   cwd: "/tmp",
   resumeCursors: { claude: "cursor" },
   lastInstanceId: "claude",
+  lastDispatchedModel: { instanceId: "claude", model: "m" },
 };
 
 describe("shared wire model", () => {
@@ -52,9 +53,11 @@ describe("shared wire model", () => {
     ]);
     expect(wire).not.toHaveProperty("resumeCursors");
     expect(wire).not.toHaveProperty("lastInstanceId");
-    expect(wire).toEqual({ ...fullTask, resumeCursors: undefined, lastInstanceId: undefined });
+    expect(wire).not.toHaveProperty("lastDispatchedModel");
+    expect(wire).toEqual({ ...fullTask, resumeCursors: undefined, lastInstanceId: undefined, lastDispatchedModel: undefined });
     expect(fullTask.resumeCursors).toEqual({ claude: "cursor" });
     expect(fullTask.lastInstanceId).toBe("claude");
+    expect(fullTask.lastDispatchedModel).toEqual({ instanceId: "claude", model: "m" });
   });
 
   it("bot and group wire projections stay exact (compile-enforced)", () => {

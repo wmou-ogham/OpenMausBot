@@ -68,6 +68,11 @@ export interface TaskRecord extends WireTask {
    * say whether an engine's session is current, so this is what decides an
    * inline replay. Absent on tasks from before the field existed. */
   lastInstanceId?: string;
+  /** the user's model selection when this conversation last took a turn.
+   * Compared with the selection on the next turn so a model switch does not
+   * also move where the conversation works. Absent until a turn or a switch
+   * has been recorded. */
+  lastDispatchedModel?: { instanceId: string; model: string };
   /** per instance: the stored messages that instance's current native
    * session has been handed on this task (server/delta-context.ts) */
   handedMessages?: Record<string, HandedState>;
@@ -76,7 +81,7 @@ export interface TaskRecord extends WireTask {
 /** TaskRecord fields no client may see. Everything else must be on WireTask:
  * the exactness assertion below fails to compile when either side drifts,
  * so a new server field forces a decision — wire-visible or private here. */
-export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages";
+export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "lastDispatchedModel" | "handedMessages";
 export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>>;
 type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 type AssertSameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
@@ -88,7 +93,7 @@ export const taskWireProjectionIsExact: TaskWireProjectionIsExact = true;
 /** The typed wire projection for one task. Pairs with the assertion above:
  * returning WireTask means an undeclared server field cannot ride silently. */
 export function toWireTask(task: TaskRecord): WireTask {
-  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages, ...wire } = task;
+  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, lastDispatchedModel: _lastDispatchedModel, handedMessages: _handedMessages, ...wire } = task;
   return wire;
 }
 
@@ -1679,10 +1684,24 @@ export class Store {
   /** Record which instance just took a turn on this task. Called at
    * dispatch, not at cursor time — transcript-replay engines never
    * produce a cursor, and they still count as having run last. */
-  markTaskDispatched(botId: string, threadId: string, instanceId: string) {
+  markTaskDispatched(
+    botId: string,
+    threadId: string,
+    instanceId: string,
+    model?: { instanceId: string; model: string },
+  ) {
     const task = this.taskByThread(botId, threadId);
-    if (!task || task.lastInstanceId === instanceId) return;
-    task.lastInstanceId = instanceId;
+    if (!task) return;
+    // Same-instance model changes (gemini-high → gemini-medium) still have
+    // to be recorded. Returning early on a matching instance id used to
+    // drop that update, so the next turn could not tell a model switch
+    // from an ordinary continuation.
+    const sameInstance = task.lastInstanceId === instanceId;
+    const sameModel = model === undefined
+      || (task.lastDispatchedModel?.instanceId === model.instanceId && task.lastDispatchedModel.model === model.model);
+    if (sameInstance && sameModel) return;
+    if (!sameInstance) task.lastInstanceId = instanceId;
+    if (model) task.lastDispatchedModel = { instanceId: model.instanceId, model: model.model };
     this.saveBots();
   }
 
@@ -1921,9 +1940,18 @@ export class Store {
     const bot = this.bot(botId);
     const task = this.taskByThread(botId, threadId);
     if (!bot || !task) return null;
+    const previousSelection = task.modelSelection ?? bot.modelSelection;
+    const modelChanged = previousSelection.instanceId !== selection.instanceId || previousSelection.model !== selection.model;
+    // Threads from before this field existed have no record of the model
+    // that last ran. Stamp the selection being replaced so the next turn
+    // can tell it is a switch and leave the conversation's place alone.
+    const remembered = task.lastDispatchedModel ?? (modelChanged
+      ? { instanceId: previousSelection.instanceId, model: previousSelection.model }
+      : undefined);
     const patch = { modelSelection: structuredClone(selection),
       ...(resetApprovalToAsk ? { approvalMode: "ask" as const, autoApprove: false, alwaysAllow: [] } : {}) };
     const nextTask = { ...task, ...taskPatch, ...patch,
+      ...(remembered ? { lastDispatchedModel: remembered } : {}),
       ...(typeof taskPatch.title === "string" ? { title: taskPatch.title.trim().slice(0, 80) || UNTITLED_THREAD } : {}) };
     // Older threads may still inherit settings. Freeze their effective
     // values before updating the default so "other threads unchanged" also

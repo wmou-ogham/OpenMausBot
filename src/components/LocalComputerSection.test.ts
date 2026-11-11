@@ -158,12 +158,28 @@ describe("Local VM inventory UI", () => {
     }));
 
     expect(markup).toContain("2/4 created");
+    expect(markup).not.toContain("2 created.");
     expect(markup).toContain("Current destination: Cloud");
     expect(markup).toContain("Current destination: Off");
     expect(markup).toContain("In use");
     expect(markup).toContain("Stop this bot&#x27;s turn before deleting its desktop.");
     expect(markup).toContain("disabled=\"\"");
     expect(markup).not.toMatch(/viewer_url|workspace_path|password=/);
+  });
+
+  it("omits the ceiling when per-bot desktops have no limit", () => {
+    const markup = renderToStaticMarkup(createElement(LocalVmInventoryCard, {
+      instances: [cloudVm],
+      maxInstances: null,
+      loading: false,
+      deletingBotId: null,
+      error: null,
+      unavailableReason: null,
+      onRefresh: vi.fn(),
+      onDelete: vi.fn(),
+    }));
+    expect(markup).toContain("1 created.");
+    expect(markup).not.toContain("1/");
   });
 
   it("keeps state labels honest", () => {

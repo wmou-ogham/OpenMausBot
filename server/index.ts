@@ -268,7 +268,7 @@ import {
 import * as tts from "./tts/index.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { ANTIGRAVITY_CHECKPOINT_ERROR, antigravityAffinityForDispatch, isTelegramThread, noteTelegramThread } from "./drivers/antigravity-session.ts";
-import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
+import { buildRecoveryText, buildTurnContext, engineIsFresh, modelSwitchLocksConversationPlace, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { prepareInboundText } from "./inbound-attachments.ts";
 import { telegramChannelPrompt, withTelegramVoiceReplyNote } from "./telegram-channel.ts";
@@ -6351,7 +6351,14 @@ async function startTurn(
   if (dispatchContext.handoff) handoffs.begin(threadId, dispatchClaimId, dispatchContext.handoff);
   directTurnBots.set(threadId, bot);
   beginInternalCapabilityGeneration(threadId, dispatchClaimId);
-  if (!opts?.computerSelectionContinuation && !opts?.cardContinuation && !opts?.automationSource && !opts?.unattended &&
+  // A model switch keeps the conversation where the user left it. Skipping
+  // registration means this turn cannot persist a new place through
+  // select_computer, and the prompt is not told that it may pick one.
+  const placeLockedByModelSwitch = modelSwitchLocksConversationPlace(task.lastDispatchedModel, {
+    instanceId: bot.modelSelection.instanceId,
+    model: bot.modelSelection.model,
+  });
+  if (!placeLockedByModelSwitch && !opts?.computerSelectionContinuation && !opts?.cardContinuation && !opts?.automationSource && !opts?.unattended &&
       !opts?.commsDepth && !opts?.coordination && !inheritedTeamComputer(bot) && bot.computer !== "off" && agentsMounted) {
     const source = store.activePath(threadId).findLast(message => message.id === userMessage?.id && message.role === "user" && !message.peerAsk);
     if (source) computerSelectionTurns.set(threadId, { generation: dispatchClaimId, botId: bot.id, source, text });
@@ -6933,7 +6940,7 @@ async function startTurn(
       // An Auto conversation remembers where its first turn landed, so later
       // turns stay there and the composer can show it. Explicit settings are
       // not recorded: changing the bot's Works on should move its threads.
-      if (bot.computer === undefined && !teamComputer && opts?.runOn !== "cloud" && !plan.pinned) {
+      if (!placeLockedByModelSwitch && bot.computer === undefined && !teamComputer && opts?.runOn !== "cloud" && !plan.pinned) {
         const used = mountedComputer ?? (integrations.browser ? "browser" : null);
         if (used) store.patchTask(bot.id, threadId, { surface: used });
       }
@@ -7109,7 +7116,10 @@ async function startTurn(
       // If a newer delegated result landed during setup, its unique marker
       // differs and must survive so the next turn also receives that update.
       if (!isExternalContextMarker(task.lastInstanceId) || task.lastInstanceId === externalContextMarker) {
-        store.markTaskDispatched(bot.id, threadId, routedId);
+        store.markTaskDispatched(bot.id, threadId, routedId, {
+          instanceId: bot.modelSelection.instanceId,
+          model: bot.modelSelection.model,
+        });
       }
       // a turn can settle before dispatch returns, and a poller started
       // after its own turn.completed would never be torn down — it would
@@ -10576,7 +10586,10 @@ async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurre
 
   if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
     const count = await existingPerBotLocalVmCount(status.runtime);
-    if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
+    const localVmLimit = localVmMaxInstances(cfg);
+    // null is unlimited. A numeric comparison would treat null as 0 and
+    // refuse every new desktop.
+    if (!isCurrent() || (localVmLimit !== null && count >= localVmLimit)) return status;
   }
 
   broadcast({ kind: "computer", botId, state: "provisioning" });
@@ -16739,9 +16752,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!before.runtime) return json(res, 409, { error: before.problem ?? "No container runtime is installed" });
           if (!(await containerComputerExists(before.runtime, target))) {
             const count = await existingPerBotLocalVmCount(before.runtime);
-            if (count >= localVmMaxInstances(cfg)) {
+            const localVmLimit = localVmMaxInstances(cfg);
+            if (localVmLimit !== null && count >= localVmLimit) {
               return json(res, 409, {
-                error: `The per-bot Local VM limit is ${localVmMaxInstances(cfg)} — delete an unused bot VM or raise the limit in App Settings`,
+                error: `The per-bot Local VM limit is ${localVmLimit} — delete an unused bot VM or raise the limit in App Settings`,
               });
             }
           }

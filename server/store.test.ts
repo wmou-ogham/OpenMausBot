@@ -14,6 +14,7 @@ import * as mdb from "./message-db.ts";
 import { peerAllowKey } from "./peer-approval-key.ts";
 import { canAccessTeam } from "./peer-roster.ts";
 import { Store, type BotRecord } from "./store.ts";
+import { modelSwitchLocksConversationPlace } from "./turn-context.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { SECTION_CONTEXTS_FILE } from "./section-context.ts";
 
@@ -596,6 +597,35 @@ describe("Store", () => {
 
     const reloaded = new Store(selection);
     expect(reloaded.bot(bot.id)?.modelSelection.effort).toBe("high");
+  });
+
+  it("remembers the replaced model and leaves the conversation place untouched", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const task = store.activeTask(bot.id)!;
+    store.patchTask(bot.id, task.threadId, { surface: "browser" });
+    store.switchTaskModel(bot.id, task.threadId, { instanceId: "cursor", model: "grok" }, true, false);
+    expect(store.taskByThread(bot.id, task.threadId)?.surface).toBe("browser");
+    expect(store.taskByThread(bot.id, task.threadId)?.lastDispatchedModel).toEqual({
+      instanceId: "claude",
+      model: "claude-sonnet-5",
+    });
+    expect(modelSwitchLocksConversationPlace(
+      store.taskByThread(bot.id, task.threadId)?.lastDispatchedModel,
+      { instanceId: "cursor", model: "grok" },
+    )).toBe(true);
+    store.markTaskDispatched(bot.id, task.threadId, "cursor", { instanceId: "cursor", model: "grok" });
+    expect(store.taskByThread(bot.id, task.threadId)?.surface).toBe("browser");
+    expect(store.taskByThread(bot.id, task.threadId)?.lastDispatchedModel).toEqual({
+      instanceId: "cursor",
+      model: "grok",
+    });
+    store.markTaskDispatched(bot.id, task.threadId, "cursor-account-2", { instanceId: "cursor", model: "grok" });
+    expect(store.taskByThread(bot.id, task.threadId)?.lastInstanceId).toBe("cursor-account-2");
+    expect(store.taskByThread(bot.id, task.threadId)?.lastDispatchedModel).toEqual({
+      instanceId: "cursor",
+      model: "grok",
+    });
   });
 
   it("stores variants independently and seeds future conversations from the bot default", () => {

@@ -438,6 +438,10 @@ describe("configuration boundaries", () => {
     });
     expect(localVmMode({ localVm: { mode: "per-bot" } })).toBe("per-bot");
     expect(localVmMaxInstances({ localVm: { maxInstances: 3 } })).toBe(3);
+    expect(parseConfigPatch({ localVm: { maxInstances: 5 } })).toEqual({ localVm: { maxInstances: 5 } });
+    expect(parseConfigPatch({ localVm: { maxInstances: null } })).toEqual({ localVm: { maxInstances: null } });
+    expect(localVmMaxInstances({ localVm: { maxInstances: null } })).toBeNull();
+    expect(localVmMaxInstances({ localVm: { maxInstances: 12 } })).toBe(12);
   });
 
   it("keeps skill authoring on by default with an explicit opt-out, and the browser off by default", () => {
@@ -499,7 +503,7 @@ describe("configuration boundaries", () => {
     expect(showToolCallsEnabled({ features: { showToolCalls: true } })).toBe(true);
   });
 
-  it.each([0, 1.5, 5, "2", null])("rejects an invalid per-bot VM limit: %j", (maxInstances) => {
+  it.each([0, 1.5, "2"])("rejects an invalid per-bot VM limit: %j", (maxInstances) => {
     expect(() => parseConfigPatch({ localVm: { maxInstances } })).toThrow("localVm.maxInstances");
   });
 

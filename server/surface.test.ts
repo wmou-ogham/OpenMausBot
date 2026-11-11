@@ -139,7 +139,9 @@ describe("surfacePrompt", () => {
     expect(text).toContain("use select_computer with no arguments");
     expect(text).toContain("surface auto instead of asking them to operate the menu");
     expect(text).toContain("highlight the selected target");
-    expect(text).toContain("when it needs desktop apps or capabilities the current Browser lacks, select an available Local VM");
+    expect(text).toContain("Switching models does not move this conversation");
+    expect(text).toContain("If a place is already selected, keep it");
+    expect(text).not.toContain("select an available Local VM without asking");
     expect(text).toContain("then you must carry out the task");
     expect(text).not.toContain("ask the user to choose and connect a computer");
   });
@@ -148,6 +150,7 @@ describe("surfacePrompt", () => {
     const text = surfacePrompt({ computer: "local", browser: false }, { pinned: "local", canSelect: true });
     expect(text).toContain("select the requested available place");
     expect(text).toContain("changing places requires select_computer");
+    expect(text).toContain("Switching models does not change this pin");
     expect(text).toContain("Never silently replace an explicitly requested VM with the host desktop");
     expect(text).not.toContain("ask the user to change the conversation's computer selector");
   });

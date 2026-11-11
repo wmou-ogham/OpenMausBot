@@ -36,7 +36,6 @@ export const MAX_THREAD_EVENT_LOG_BYTES = 4 * 1024 * 1024 * 1024;
 export const DEFAULT_LOCAL_VM_MODE = "shared" as const;
 export const DEFAULT_LOCAL_VM_MAX_INSTANCES = 2;
 export const MIN_LOCAL_VM_MAX_INSTANCES = 1;
-export const MAX_LOCAL_VM_MAX_INSTANCES = 4;
 
 export function isValidSshAlias(value: unknown): value is string {
   return typeof value === "string" && SSH_ALIAS.test(value);
@@ -106,12 +105,11 @@ const roomConfigSchema = z.object({
 );
 const localVmConfigSchema = z.object({
   mode: z.enum(["shared", "per-bot"]).optional(),
-  maxInstances: z
-    .number()
-    .int()
-    .min(MIN_LOCAL_VM_MAX_INSTANCES)
-    .max(MAX_LOCAL_VM_MAX_INSTANCES)
-    .optional(),
+  // null means no cap. Omitting the field still defaults to 2.
+  maxInstances: z.union([
+    z.number().int().min(MIN_LOCAL_VM_MAX_INSTANCES),
+    z.null(),
+  ]).optional(),
 });
 /** A named, shareable browser session ("Work", "Client A"). The id names a
  * durable Electron partition; user-controlled characters never reach it. */
@@ -475,7 +473,7 @@ export interface AppConfig {
   threads?: { maxConcurrentPerBot: number; eventLogMaxBytes?: number; eventLogRetentionDays?: number };
   /** Shared preserves the historical singleton. Per-bot gives every bot a
    * separate container, durable workspace, viewer and lease. */
-  localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
+  localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number | null };
   /** Opt-in product experiments. Every flag defaults to disabled. */
   features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean };
   /** First-run progress; see onboardingConfigSchema. */
@@ -648,8 +646,12 @@ export function localVmMode(cfg: AppConfig): "shared" | "per-bot" {
   return cfg.localVm?.mode ?? DEFAULT_LOCAL_VM_MODE;
 }
 
-export function localVmMaxInstances(cfg: AppConfig): number {
-  return cfg.localVm?.maxInstances ?? DEFAULT_LOCAL_VM_MAX_INSTANCES;
+/** null means unlimited. A missing field stays at the historical default of 2
+ * so existing installs do not suddenly lose their cap. */
+export function localVmMaxInstances(cfg: AppConfig): number | null {
+  const cap = cfg.localVm?.maxInstances;
+  if (cap === null) return null;
+  return cap ?? DEFAULT_LOCAL_VM_MAX_INSTANCES;
 }
 
 /** On by default; only an explicit `false` (the Settings toggle, or a legacy
