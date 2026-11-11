@@ -3378,7 +3378,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (event.type === "turn.started" || event.type === "session.model-variants" || event.type === "turn.completed") {
             rawDispatch({ type: "modelVariantRuntime", event });
           }
-          if (event.type === "turn.retrying" && (event.reason === "antigravity_quota" || event.reason === "antigravity_checkpoint")) {
+          if (event.type === "turn.retrying" && (event.reason === "antigravity_quota" || event.reason === "antigravity_checkpoint" || event.reason === "antigravity_capacity" || event.reason.startsWith("antigravity_capacity:"))) {
             clearStream(event.threadId);
           }
           if (event.type === "content.delta") {

@@ -402,4 +402,24 @@ describe("antigravity sticky session through the ACP driver", () => {
     expect(sessionId(dump)).toBe("fake-acp-session");
     expect(promptText(dump).startsWith("You are Moriss.\n\n")).toBe(true);
   });
+
+  it("drops a model-capacity reply so the host can send a new request", async () => {
+    const fake = fakeRuntime();
+    const dump = join(fake.directory, "capacity.json");
+    const instance = await createDriver(fake.executable, dump, "echo-gated");
+    const recorder = recordEvents(instance.adapter);
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "capacity-me",
+      text: "Agent execution error: model unreachable: Error 503, No capacity available for model gemini-3.8-flash-high, reason:MODEL_CAPACITY_EXHAUSTED",
+      system: "You are Moriss.",
+      approvalMode: "ask",
+      model: "gemini-3.8-flash-high",
+      antigravityAffinity: { inputTokens: 10, gapMs: 1_000 },
+      cwd: fake.directory,
+    });
+    const retry = await recorder.until((event) => event.type === "turn.retrying" && event.turnId === turnId);
+    expect(retry).toMatchObject({ reason: "antigravity_capacity:gemini-3.8-flash-high", attempt: 1, delayMs: 0 });
+    expect(recorder.events.some((event) => event.type === "turn.completed" || event.type === "item.completed")).toBe(false);
+    expect(antigravityResumeDecision({ threadId: "capacity-me", antigravityAffinity: { inputTokens: 10 } }).resume).toBe(true);
+  });
 });

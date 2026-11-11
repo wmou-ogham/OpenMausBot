@@ -35,6 +35,11 @@ import {
   rememberAntigravityReplyNotice,
 } from "../antigravity-pool.ts";
 import {
+  antigravityCapacityExhausted,
+  antigravityCapacityReason,
+  antigravityExhaustedModel,
+} from "./antigravity-capacity.ts";
+import {
   ANTIGRAVITY_CHECKPOINT_ERROR,
   antigravityNoteAssistantText,
   antigravityNoteObserved,
@@ -104,6 +109,9 @@ const support: AcpSupport = {
       antigravityNotePoison(threadId);
       return "antigravity_checkpoint";
     }
+    // The CLI already exhausted retries of this one request. Drop the error
+    // text so the host can send a new request after a pause.
+    if (antigravityCapacityExhausted(text)) return antigravityCapacityReason(antigravityExhaustedModel(text));
     if (!antigravityReplyNeedsAccountSwitch(text)) return false;
     rememberAntigravityReplyNotice(threadId, text);
     return "antigravity_quota";

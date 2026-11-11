@@ -167,6 +167,14 @@ import {
   type SteerOutcome,
   newId,
 } from "./contracts.ts";
+import {
+  ANTIGRAVITY_CAPACITY_DELAYS_MS,
+  ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS,
+  antigravityCapacityDelay,
+  antigravityCapacityFallback,
+  antigravityCapacityReasonModel,
+  isAntigravityCapacityReason,
+} from "./drivers/antigravity-capacity.ts";
 import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
 import { decodeGeneratedImage } from "./generated-image.ts";
 import {
@@ -1081,11 +1089,28 @@ async function interruptDirectThread(botId: string, threadId: string): Promise<v
   const owner = botForThread(botId, threadId);
   const generation = directTurnGenerationByThread.get(threadId);
   cancelDirectTurnDispatch(botId, threadId);
+  const capacityWait = clearAntigravityCapacityRetry(threadId);
   revokeInternalCapabilitiesForThread(threadId);
   // Main routes Stop to the engine that started the turn; keep this branch's
   // generation fence so a replacement turn's approvals are never closed here.
   await (owner ? runningTurnInstance(owner, threadId) : null)?.adapter.interruptTurn(threadId);
   if (directTurnGenerationByThread.get(threadId) === generation) closeOpenApprovals(threadId);
+  // The capacity wait already abandoned the provider turn, so Stop has no
+  // process left to finish the thread. Settle it here or the chat stays busy.
+  if (capacityWait && directTurnGenerationByThread.get(threadId) === capacityWait.generation) {
+    bus.publish({
+      eventId: newId(),
+      provider: capacityWait.provider,
+      providerInstanceId: capacityWait.providerInstanceId,
+      threadId,
+      turnId: capacityWait.turnId,
+      createdAt: new Date().toISOString(),
+      type: "turn.completed",
+      ok: false,
+      stopReason: "interrupted",
+      cost: null,
+    });
+  }
 }
 
 /** Stop left teammates mid-turn: say so in the transcript, name them, and
@@ -4024,6 +4049,112 @@ function retryAntigravityAfterCheckpoint(bot: BotRecord, event: RuntimeEvent): b
   return true;
 }
 
+interface AntigravityCapacityWait {
+  attempt: number;
+  delayMs: number;
+  generation: string | undefined;
+  provider: RuntimeEvent["provider"];
+  providerInstanceId: RuntimeEvent["providerInstanceId"];
+  turnId: RuntimeEvent["turnId"];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const antigravityCapacityWaits = new Map<string, AntigravityCapacityWait>();
+/** Models already refused for capacity on this thread, and how many times
+ * the same model was retried when nothing else was available. */
+const antigravityCapacityPlans = new Map<string, { tried: string[]; sameModelWaits: number; lastScheduled?: string }>();
+
+function cancelAntigravityCapacityWait(threadId: string): AntigravityCapacityWait | null {
+  const wait = antigravityCapacityWaits.get(threadId);
+  if (!wait) return null;
+  clearTimeout(wait.timer);
+  antigravityCapacityWaits.delete(threadId);
+  return wait;
+}
+
+function clearAntigravityCapacityRetry(threadId: string): AntigravityCapacityWait | null {
+  const wait = cancelAntigravityCapacityWait(threadId);
+  antigravityCapacityPlans.delete(threadId);
+  return wait;
+}
+
+function publishAntigravityCapacityFailure(event: RuntimeEvent): void {
+  clearAntigravityCapacityRetry(event.threadId);
+  const text = "This model has no server capacity right now. OpenMausBot retried with a new request and it is still unavailable.";
+  const turnId = event.turnId ?? newId();
+  const stamped = {
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    threadId: event.threadId,
+    turnId,
+    createdAt: new Date().toISOString(),
+  };
+  bus.publish({ ...stamped, eventId: newId(), type: "item.completed", itemType: "assistant_text", text });
+  bus.publish({ ...stamped, eventId: newId(), type: "turn.completed", ok: false, stopReason: "capacity", cost: null });
+}
+
+/** The CLI already refused more retries of the failed request. Prefer a
+ * different Antigravity model for the next request. The saved bot model is
+ * left alone. With only one model, wait and send the same one again. */
+function scheduleAntigravityCapacityRetry(
+  bot: BotRecord,
+  event: Extract<RuntimeEvent, { type: "turn.retrying" }>,
+): { delayMs: number; attempt: number; label?: string } | null {
+  const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
+    message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
+  const plan = antigravityCapacityPlans.get(event.threadId) ?? { tried: [], sameModelWaits: 0 };
+  if (plan.lastScheduled && !plan.tried.includes(plan.lastScheduled)) plan.tried.push(plan.lastScheduled);
+  const exhausted = antigravityCapacityReasonModel(event.reason) ?? plan.lastScheduled ?? bot.modelSelection.model;
+  if (exhausted && !plan.tried.includes(exhausted)) plan.tried.push(exhausted);
+  const catalog = registry.get(bot.modelSelection.instanceId)?.models.options ?? [];
+  const next = antigravityCapacityFallback(catalog.map((option) => option.id), plan.tried);
+  const delayMs = next ? ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS : antigravityCapacityDelay(plan.sameModelWaits);
+  if (!user?.text || delayMs === null) {
+    publishAntigravityCapacityFailure(event);
+    return null;
+  }
+  if (!next) plan.sameModelWaits += 1;
+  plan.lastScheduled = next ?? exhausted;
+  antigravityCapacityPlans.set(event.threadId, plan);
+  cancelAntigravityCapacityWait(event.threadId);
+  const generation = directTurnGenerationByThread.get(event.threadId);
+  const run = activeRoutineRunForThread(event.threadId);
+  const label = next ? catalog.find((option) => option.id === next)?.label ?? next : undefined;
+  const timer = setTimeout(() => {
+    const wait = antigravityCapacityWaits.get(event.threadId);
+    if (wait?.timer !== timer) return;
+    antigravityCapacityWaits.delete(event.threadId);
+    if (directTurnGenerationByThread.get(event.threadId) !== generation) return;
+    console.error(`[antigravity-capacity] thread=${event.threadId} retrying${next ? ` on ${next}` : ""} after ${delayMs}ms`);
+    void startTurn(bot.id, user.text!, {
+      threadId: event.threadId,
+      userMessage: user,
+      replacingTurn: true,
+      ...(next ? { modelOverride: next } : {}),
+      ...(run ? {
+        runOn: run.runOn,
+        automationSource: run.triggerSource ?? (run.manual ? "manual" : "schedule"),
+        unattended: true,
+      } : {}),
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[antigravity-capacity] thread=${event.threadId} retry failed: ${message}`);
+      if (directTurnGenerationByThread.get(event.threadId) === generation) publishAntigravityCapacityFailure(event);
+    });
+  }, delayMs);
+  timer.unref?.();
+  antigravityCapacityWaits.set(event.threadId, {
+    attempt: plan.tried.length,
+    delayMs,
+    generation,
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    turnId: event.turnId,
+    timer,
+  });
+  return { delayMs, attempt: plan.tried.length, ...(label ? { label } : {}) };
+}
+
 function publishAntigravityCheckpointFailure(event: RuntimeEvent, detail?: string): void {
   const text = detail?.trim() || `Agent execution error: ${ANTIGRAVITY_CHECKPOINT_ERROR}`;
   const turnId = event.turnId ?? newId();
@@ -4702,6 +4833,23 @@ bus.subscribe((event: RuntimeEvent) => {
         } else if (!bot) publishAntigravityCheckpointFailure(event);
         break;
       }
+      if (isAntigravityCapacityReason(event.reason)) {
+        const scheduled = bot ? scheduleAntigravityCapacityRetry(bot, event) : null;
+        if (scheduled) {
+          const seconds = Math.round(scheduled.delayMs / 1000);
+          pushMessage({
+            role: "bot",
+            kind: "activity",
+            tool: {
+              name: scheduled.label
+                ? `no capacity — trying ${scheduled.label} in ${seconds}s`
+                : `model has no capacity — retrying in ${seconds}s (${scheduled.attempt}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`,
+              ok: true,
+            },
+          });
+        } else if (!bot) publishAntigravityCapacityFailure(event);
+        break;
+      }
       // the driver is about to relaunch the turn after a transient failure;
       // the activity chip keeps the bot visibly busy through the backoff
       pushMessage({
@@ -4732,6 +4880,7 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "turn.completed": {
       antigravityCheckpointRetrying.delete(event.threadId);
+      clearAntigravityCapacityRetry(event.threadId);
       // A peer-started turn settles as coordination, not as news. What keeps
       // that classification from outliving its turn is the rewrite at
       // dispatch, not this line — releasing it here too is hygiene, so a
@@ -5808,6 +5957,8 @@ async function startTurn(
     /** The current turn already holds this thread. A quota reply is handing
      * the same user message to the next account without looking idle first. */
     replacingTurn?: boolean;
+    /** One turn on another model. The bot's saved selection stays put. */
+    modelOverride?: string;
     coordination?: { id: string; resumed: boolean; settle: (outcome: { ok: boolean; text: string }) => void };
   },
 ) {
@@ -5938,11 +6089,13 @@ async function startTurn(
       optionIds: instance.models.options.map((option) => option.id),
       fallback: instance.models.default,
     });
-  const model = opts?.runOn === "cloud" || switchedEngine ? instance.models.default : bot.modelSelection.model;
+  const model = opts?.modelOverride
+    ?? (opts?.runOn === "cloud" || switchedEngine ? instance.models.default : bot.modelSelection.model);
   // a cloud routine borrows the instance default model, so it borrows no
-  // per-bot effort either
-  const effort = opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.effort;
-  const variant = opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.variant;
+  // per-bot effort either. A capacity fallback names a whole model id
+  // (gemini-3.8-flash-medium) and must not reuse the exhausted model's effort.
+  const effort = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.effort;
+  const variant = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.variant;
   assertModelVariantSupported({ variant, effort }, instance.adapter.capabilities);
   // A selection can be persisted while its engine is offline. Re-check when
   // the engine returns so an old or unsupported value never reaches a CLI.
