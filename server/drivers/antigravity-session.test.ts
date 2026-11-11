@@ -420,6 +420,7 @@ describe("antigravity sticky session through the ACP driver", () => {
     const retry = await recorder.until((event) => event.type === "turn.retrying" && event.turnId === turnId);
     expect(retry).toMatchObject({ reason: "antigravity_capacity:gemini-3.8-flash-high", attempt: 1, delayMs: 0 });
     expect(recorder.events.some((event) => event.type === "turn.completed" || event.type === "item.completed")).toBe(false);
+    expect(recorder.events.some((event) => event.type === "content.delta" && event.streamKind === "assistant_text")).toBe(false);
     expect(antigravityResumeDecision({ threadId: "capacity-me", antigravityAffinity: { inputTokens: 10 } }).resume).toBe(true);
   });
 });
