@@ -167,6 +167,11 @@ import {
   type SteerOutcome,
   newId,
 } from "./contracts.ts";
+import {
+  ANTIGRAVITY_CAPACITY_DELAYS_MS,
+  ANTIGRAVITY_CAPACITY_REASON,
+  antigravityCapacityDelay,
+} from "./drivers/antigravity-capacity.ts";
 import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
 import { decodeGeneratedImage } from "./generated-image.ts";
 import {
@@ -1081,11 +1086,28 @@ async function interruptDirectThread(botId: string, threadId: string): Promise<v
   const owner = botForThread(botId, threadId);
   const generation = directTurnGenerationByThread.get(threadId);
   cancelDirectTurnDispatch(botId, threadId);
+  const capacityWait = clearAntigravityCapacityRetry(threadId);
   revokeInternalCapabilitiesForThread(threadId);
   // Main routes Stop to the engine that started the turn; keep this branch's
   // generation fence so a replacement turn's approvals are never closed here.
   await (owner ? runningTurnInstance(owner, threadId) : null)?.adapter.interruptTurn(threadId);
   if (directTurnGenerationByThread.get(threadId) === generation) closeOpenApprovals(threadId);
+  // The capacity wait already abandoned the provider turn, so Stop has no
+  // process left to finish the thread. Settle it here or the chat stays busy.
+  if (capacityWait && directTurnGenerationByThread.get(threadId) === capacityWait.generation) {
+    bus.publish({
+      eventId: newId(),
+      provider: capacityWait.provider,
+      providerInstanceId: capacityWait.providerInstanceId,
+      threadId,
+      turnId: capacityWait.turnId,
+      createdAt: new Date().toISOString(),
+      type: "turn.completed",
+      ok: false,
+      stopReason: "interrupted",
+      cost: null,
+    });
+  }
 }
 
 /** Stop left teammates mid-turn: say so in the transcript, name them, and
@@ -4024,6 +4046,100 @@ function retryAntigravityAfterCheckpoint(bot: BotRecord, event: RuntimeEvent): b
   return true;
 }
 
+interface AntigravityCapacityWait {
+  attempt: number;
+  delayMs: number;
+  generation: string | undefined;
+  provider: RuntimeEvent["provider"];
+  providerInstanceId: RuntimeEvent["providerInstanceId"];
+  turnId: RuntimeEvent["turnId"];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const antigravityCapacityWaits = new Map<string, AntigravityCapacityWait>();
+/** Host retries already sent for this thread. Survives the wait timer so the
+ * next capacity failure uses the following delay instead of starting over. */
+const antigravityCapacityAttempts = new Map<string, number>();
+
+function cancelAntigravityCapacityWait(threadId: string): AntigravityCapacityWait | null {
+  const wait = antigravityCapacityWaits.get(threadId);
+  if (!wait) return null;
+  clearTimeout(wait.timer);
+  antigravityCapacityWaits.delete(threadId);
+  return wait;
+}
+
+function clearAntigravityCapacityRetry(threadId: string): AntigravityCapacityWait | null {
+  const wait = cancelAntigravityCapacityWait(threadId);
+  antigravityCapacityAttempts.delete(threadId);
+  return wait;
+}
+
+function publishAntigravityCapacityFailure(event: RuntimeEvent): void {
+  clearAntigravityCapacityRetry(event.threadId);
+  const text = "This model has no server capacity right now. OpenMausBot retried with a new request and it is still unavailable.";
+  const turnId = event.turnId ?? newId();
+  const stamped = {
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    threadId: event.threadId,
+    turnId,
+    createdAt: new Date().toISOString(),
+  };
+  bus.publish({ ...stamped, eventId: newId(), type: "item.completed", itemType: "assistant_text", text });
+  bus.publish({ ...stamped, eventId: newId(), type: "turn.completed", ok: false, stopReason: "capacity", cost: null });
+}
+
+/** The CLI already refused more retries of the failed request. Wait, then
+ * send the same user message as a new request. Stop during the wait cancels
+ * it; past the delay list the short failure above is the reply. */
+function scheduleAntigravityCapacityRetry(bot: BotRecord, event: RuntimeEvent): { delayMs: number; attempt: number } | null {
+  const attempt = antigravityCapacityAttempts.get(event.threadId) ?? 0;
+  const delayMs = antigravityCapacityDelay(attempt);
+  const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
+    message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
+  if (delayMs === null || !user?.text) {
+    publishAntigravityCapacityFailure(event);
+    return null;
+  }
+  cancelAntigravityCapacityWait(event.threadId);
+  antigravityCapacityAttempts.set(event.threadId, attempt + 1);
+  const generation = directTurnGenerationByThread.get(event.threadId);
+  const run = activeRoutineRunForThread(event.threadId);
+  const timer = setTimeout(() => {
+    const wait = antigravityCapacityWaits.get(event.threadId);
+    if (wait?.timer !== timer) return;
+    antigravityCapacityWaits.delete(event.threadId);
+    if (directTurnGenerationByThread.get(event.threadId) !== generation) return;
+    console.error(`[antigravity-capacity] thread=${event.threadId} retrying after ${delayMs}ms (attempt ${attempt + 1}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`);
+    void startTurn(bot.id, user.text!, {
+      threadId: event.threadId,
+      userMessage: user,
+      replacingTurn: true,
+      ...(run ? {
+        runOn: run.runOn,
+        automationSource: run.triggerSource ?? (run.manual ? "manual" : "schedule"),
+        unattended: true,
+      } : {}),
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[antigravity-capacity] thread=${event.threadId} retry failed: ${message}`);
+      if (directTurnGenerationByThread.get(event.threadId) === generation) publishAntigravityCapacityFailure(event);
+    });
+  }, delayMs);
+  timer.unref?.();
+  antigravityCapacityWaits.set(event.threadId, {
+    attempt: attempt + 1,
+    delayMs,
+    generation,
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    turnId: event.turnId,
+    timer,
+  });
+  return { delayMs, attempt: attempt + 1 };
+}
+
 function publishAntigravityCheckpointFailure(event: RuntimeEvent, detail?: string): void {
   const text = detail?.trim() || `Agent execution error: ${ANTIGRAVITY_CHECKPOINT_ERROR}`;
   const turnId = event.turnId ?? newId();
@@ -4702,6 +4818,20 @@ bus.subscribe((event: RuntimeEvent) => {
         } else if (!bot) publishAntigravityCheckpointFailure(event);
         break;
       }
+      if (event.reason === ANTIGRAVITY_CAPACITY_REASON) {
+        const scheduled = bot ? scheduleAntigravityCapacityRetry(bot, event) : null;
+        if (scheduled) {
+          pushMessage({
+            role: "bot",
+            kind: "activity",
+            tool: {
+              name: `model has no capacity — retrying in ${Math.round(scheduled.delayMs / 1000)}s (${scheduled.attempt}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`,
+              ok: true,
+            },
+          });
+        } else if (!bot) publishAntigravityCapacityFailure(event);
+        break;
+      }
       // the driver is about to relaunch the turn after a transient failure;
       // the activity chip keeps the bot visibly busy through the backoff
       pushMessage({
@@ -4732,6 +4862,7 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "turn.completed": {
       antigravityCheckpointRetrying.delete(event.threadId);
+      clearAntigravityCapacityRetry(event.threadId);
       // A peer-started turn settles as coordination, not as news. What keeps
       // that classification from outliving its turn is the rewrite at
       // dispatch, not this line — releasing it here too is hygiene, so a
