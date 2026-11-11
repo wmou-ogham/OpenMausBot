@@ -12,6 +12,10 @@ export const ANTIGRAVITY_CAPACITY_DELAYS_MS = [20_000, 40_000, 60_000, 60_000] a
 /** Pause before a different model. That model may have capacity immediately. */
 export const ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS = 5_000;
 
+/** After a fallback model answers, keep using it this long. The exhausted
+ * model is unlikely to have capacity again in the next few minutes. */
+export const ANTIGRAVITY_CAPACITY_HOLD_MS = 15 * 60 * 1000;
+
 const CAPACITY_MARKERS = [
   /model unreachable/i,
   /MODEL_CAPACITY_EXHAUSTED/,
@@ -71,4 +75,38 @@ export function antigravityCapacityReasonModel(reason: string): string | null {
 
 export function isAntigravityCapacityReason(reason: string | undefined): boolean {
   return reason === ANTIGRAVITY_CAPACITY_REASON || (reason?.startsWith(`${ANTIGRAVITY_CAPACITY_REASON}:`) ?? false);
+}
+
+const ERROR_PREFIX = "agent execution error";
+
+/** What to do with assistant text while it is still streaming.
+ * `drop` is a capacity error and must never be shown.
+ * `hold` might still become that error, so it stays off the wire.
+ * `show` is a normal reply. */
+export function antigravityCapacityStream(text: string): "drop" | "hold" | "show" {
+  if (antigravityCapacityExhausted(text)) return "drop";
+  const trimmed = text.trimStart().toLowerCase();
+  if (!trimmed) return "hold";
+  if (ERROR_PREFIX.startsWith(trimmed) || trimmed.startsWith(ERROR_PREFIX)) {
+    return trimmed.length < 180 ? "hold" : "show";
+  }
+  return "show";
+}
+
+/** Every listed model has already been refused, and there was more than one
+ * to try. A single-model catalog is not exhausted here: the host may wait
+ * and ask that model again. */
+export function antigravityCapacityCatalogExhausted(options: readonly string[], tried: readonly string[]): boolean {
+  const ids = options.filter((id) => id.length > 0);
+  if (ids.length <= 1) return false;
+  const blocked = new Set(tried);
+  return ids.every((id) => blocked.has(id));
+}
+
+export function antigravityCapacitySwitchedNotice(model: string): string {
+  return `已改用 ${model}，接下來 15 分鐘先用這個模型。`;
+}
+
+export function antigravityCapacityGaveUpNotice(): string {
+  return "這些模型目前都沒有容量，稍後再試。";
 }

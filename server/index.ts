@@ -168,11 +168,14 @@ import {
   newId,
 } from "./contracts.ts";
 import {
-  ANTIGRAVITY_CAPACITY_DELAYS_MS,
+  ANTIGRAVITY_CAPACITY_HOLD_MS,
   ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS,
+  antigravityCapacityCatalogExhausted,
   antigravityCapacityDelay,
   antigravityCapacityFallback,
+  antigravityCapacityGaveUpNotice,
   antigravityCapacityReasonModel,
+  antigravityCapacitySwitchedNotice,
   isAntigravityCapacityReason,
 } from "./drivers/antigravity-capacity.ts";
 import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
@@ -4061,8 +4064,22 @@ interface AntigravityCapacityWait {
 
 const antigravityCapacityWaits = new Map<string, AntigravityCapacityWait>();
 /** Models already refused for capacity on this thread, and how many times
- * the same model was retried when nothing else was available. */
-const antigravityCapacityPlans = new Map<string, { tried: string[]; sameModelWaits: number; lastScheduled?: string }>();
+ * the same model was retried when nothing else was available.
+ * `announceModel` is the fallback that should be named once it answers. */
+const antigravityCapacityPlans = new Map<string, { tried: string[]; sameModelWaits: number; lastScheduled?: string; announceModel?: string }>();
+/** A fallback model that just answered. Later turns on this bot use it
+ * until `until`, without changing the saved selection. */
+const antigravityCapacityHolds = new Map<string, { model: string; until: number }>();
+
+function antigravityCapacityHeldModel(botId: string, now = Date.now()): string | undefined {
+  const hold = antigravityCapacityHolds.get(botId);
+  if (!hold) return undefined;
+  if (hold.until <= now) {
+    antigravityCapacityHolds.delete(botId);
+    return undefined;
+  }
+  return hold.model;
+}
 
 function cancelAntigravityCapacityWait(threadId: string): AntigravityCapacityWait | null {
   const wait = antigravityCapacityWaits.get(threadId);
@@ -4080,7 +4097,7 @@ function clearAntigravityCapacityRetry(threadId: string): AntigravityCapacityWai
 
 function publishAntigravityCapacityFailure(event: RuntimeEvent): void {
   clearAntigravityCapacityRetry(event.threadId);
-  const text = "This model has no server capacity right now. OpenMausBot retried with a new request and it is still unavailable.";
+  const text = antigravityCapacityGaveUpNotice();
   const turnId = event.turnId ?? newId();
   const stamped = {
     provider: event.provider,
@@ -4094,12 +4111,13 @@ function publishAntigravityCapacityFailure(event: RuntimeEvent): void {
 }
 
 /** The CLI already refused more retries of the failed request. Prefer a
- * different Antigravity model for the next request. The saved bot model is
- * left alone. With only one model, wait and send the same one again. */
+ * different Antigravity model for the next request. The saved selection
+ * stays put; a model that answers is kept for the hold window. With only
+ * one model, wait and send that one again. */
 function scheduleAntigravityCapacityRetry(
   bot: BotRecord,
   event: Extract<RuntimeEvent, { type: "turn.retrying" }>,
-): { delayMs: number; attempt: number; label?: string } | null {
+): { delayMs: number; attempt: number } | null {
   const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
     message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
   const plan = antigravityCapacityPlans.get(event.threadId) ?? { tried: [], sameModelWaits: 0 };
@@ -4107,19 +4125,24 @@ function scheduleAntigravityCapacityRetry(
   const exhausted = antigravityCapacityReasonModel(event.reason) ?? plan.lastScheduled ?? bot.modelSelection.model;
   if (exhausted && !plan.tried.includes(exhausted)) plan.tried.push(exhausted);
   const catalog = registry.get(bot.modelSelection.instanceId)?.models.options ?? [];
-  const next = antigravityCapacityFallback(catalog.map((option) => option.id), plan.tried);
+  const catalogIds = catalog.map((option) => option.id);
+  const next = antigravityCapacityFallback(catalogIds, plan.tried);
+  if (!user?.text || antigravityCapacityCatalogExhausted(catalogIds, plan.tried)) {
+    publishAntigravityCapacityFailure(event);
+    return null;
+  }
   const delayMs = next ? ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS : antigravityCapacityDelay(plan.sameModelWaits);
-  if (!user?.text || delayMs === null) {
+  if (delayMs === null) {
     publishAntigravityCapacityFailure(event);
     return null;
   }
   if (!next) plan.sameModelWaits += 1;
+  else plan.announceModel = next;
   plan.lastScheduled = next ?? exhausted;
   antigravityCapacityPlans.set(event.threadId, plan);
   cancelAntigravityCapacityWait(event.threadId);
   const generation = directTurnGenerationByThread.get(event.threadId);
   const run = activeRoutineRunForThread(event.threadId);
-  const label = next ? catalog.find((option) => option.id === next)?.label ?? next : undefined;
   const timer = setTimeout(() => {
     const wait = antigravityCapacityWaits.get(event.threadId);
     if (wait?.timer !== timer) return;
@@ -4152,7 +4175,7 @@ function scheduleAntigravityCapacityRetry(
     turnId: event.turnId,
     timer,
   });
-  return { delayMs, attempt: plan.tried.length, ...(label ? { label } : {}) };
+  return { delayMs, attempt: plan.tried.length };
 }
 
 function publishAntigravityCheckpointFailure(event: RuntimeEvent, detail?: string): void {
@@ -4834,20 +4857,8 @@ bus.subscribe((event: RuntimeEvent) => {
         break;
       }
       if (isAntigravityCapacityReason(event.reason)) {
-        const scheduled = bot ? scheduleAntigravityCapacityRetry(bot, event) : null;
-        if (scheduled) {
-          const seconds = Math.round(scheduled.delayMs / 1000);
-          pushMessage({
-            role: "bot",
-            kind: "activity",
-            tool: {
-              name: scheduled.label
-                ? `no capacity — trying ${scheduled.label} in ${seconds}s`
-                : `model has no capacity — retrying in ${seconds}s (${scheduled.attempt}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`,
-              ok: true,
-            },
-          });
-        } else if (!bot) publishAntigravityCapacityFailure(event);
+        if (bot) scheduleAntigravityCapacityRetry(bot, event);
+        else publishAntigravityCapacityFailure(event);
         break;
       }
       // the driver is about to relaunch the turn after a transient failure;
@@ -4880,6 +4891,7 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "turn.completed": {
       antigravityCheckpointRetrying.delete(event.threadId);
+      const capacityModel = event.ok ? antigravityCapacityPlans.get(event.threadId)?.announceModel : undefined;
       clearAntigravityCapacityRetry(event.threadId);
       // A peer-started turn settles as coordination, not as news. What keeps
       // that classification from outliving its turn is the rewrite at
@@ -4916,6 +4928,20 @@ bus.subscribe((event: RuntimeEvent) => {
       if (completedTurnId) store.markTerminalAssistantMessage(event.threadId, completedTurnId);
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
+      if (capacityModel && bot && capacityModel !== bot.modelSelection.model) {
+        antigravityCapacityHolds.set(bot.id, { model: capacityModel, until: Date.now() + ANTIGRAVITY_CAPACITY_HOLD_MS });
+        bus.publish({
+          eventId: newId(),
+          provider: event.provider,
+          providerInstanceId: event.providerInstanceId,
+          threadId: event.threadId,
+          createdAt: new Date().toISOString(),
+          type: "item.completed",
+          itemType: "assistant_text",
+          text: antigravityCapacitySwitchedNotice(capacityModel),
+        });
+        lastReply.delete(event.threadId);
+      }
       // A run that broke — not one the person stopped, and not a routine's,
       // which reports through its own failure path — is the Chief's to see.
       if (!event.ok && event.stopReason !== "interrupted" && !routines?.runForThread(event.threadId)) {
@@ -6089,13 +6115,19 @@ async function startTurn(
       optionIds: instance.models.options.map((option) => option.id),
       fallback: instance.models.default,
     });
+  const heldModel = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine || instance.driverKind !== "antigravityAgent"
+    ? undefined
+    : antigravityCapacityHeldModel(bot.id);
   const model = opts?.modelOverride
+    ?? heldModel
     ?? (opts?.runOn === "cloud" || switchedEngine ? instance.models.default : bot.modelSelection.model);
   // a cloud routine borrows the instance default model, so it borrows no
   // per-bot effort either. A capacity fallback names a whole model id
   // (gemini-3.8-flash-medium) and must not reuse the exhausted model's effort.
-  const effort = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.effort;
-  const variant = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.variant;
+  const standingIn = Boolean(opts?.modelOverride || heldModel);
+  const effort = standingIn || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.effort;
+  const variant = standingIn || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.variant;
+  if (heldModel) console.error(`[antigravity-capacity] bot=${bot.id} keeping ${heldModel} for the capacity hold`);
   assertModelVariantSupported({ variant, effort }, instance.adapter.capabilities);
   // A selection can be persisted while its engine is offline. Re-check when
   // the engine returns so an old or unsupported value never reaches a CLI.

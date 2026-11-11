@@ -37,6 +37,7 @@ import {
 import {
   antigravityCapacityExhausted,
   antigravityCapacityReason,
+  antigravityCapacityStream,
   antigravityExhaustedModel,
 } from "./antigravity-capacity.ts";
 import {
@@ -101,6 +102,7 @@ const support: AcpSupport = {
   noteUsage: antigravityNoteUsage,
   noteObserved: antigravityNoteObserved,
   noteAssistantDelta: antigravityNoteAssistantText,
+  gateAssistantText: antigravityCapacityStream,
   abandonAssistantText: (threadId, text) => {
     // noteUsage(0) on this same turn clears a poison recorded while the
     // text was streaming. Put it back after that report, or the retry

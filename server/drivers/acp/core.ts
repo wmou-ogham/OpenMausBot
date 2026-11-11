@@ -174,6 +174,10 @@ export interface AcpSupport {
    * reason, or true for the historical quota reason, to drop it so the host
    * can run the same turn again. A false result settles the turn normally. */
   abandonAssistantText?(threadId: string, text: string): boolean | string;
+  /** Decide whether streamed assistant text may leave the process yet.
+   * `drop` abandons the turn. `hold` keeps the chunk until a later one
+   * can tell a real reply from an error. Omit to stream every chunk. */
+  gateAssistantText?(accumulated: string): "drop" | "hold" | "show";
   /** Rewrite a picker id (`omlx::model`) into the CLI-native id before spawn
    * and session/select. Local inject writers live here so the child sees a
    * model it already knows. */
@@ -551,7 +555,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           stdio: ["pipe", "pipe", "pipe"],
         });
 
-        const state = { settled: false, promptSent: false, text: "" };
+        const state = { settled: false, promptSent: false, text: "", pendingAssistant: "", droppedAssistant: false };
         const asks = new Map<string, (behavior: string, source?: "user" | "timeout" | "system", message?: string, always?: boolean) => void>();
         let nextId = 1;
         let sessionId: string | null = null;
@@ -695,7 +699,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         const flushAssistantText = () => {
           const text = state.text;
           state.text = "";
-          if (!text.trim()) return;
+          state.pendingAssistant = "";
+          if (state.droppedAssistant || !text.trim()) return;
           emit({ ...base(threadId, turnId), type: "item.completed", itemType: "assistant_text", text });
         };
 
@@ -724,7 +729,10 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         /** Drop the reply without settling. The host sees turn.retrying and
          * decides whether to run this same turn again. */
         const abandonTurn = (retryReason: string) => {
+          if (state.settled) return;
           state.text = "";
+          state.pendingAssistant = "";
+          state.droppedAssistant = true;
           state.settled = true;
           if (interruptTimer) clearTimeout(interruptTimer);
           for (const finish of asks.values()) finish("cancel", "system");
@@ -885,7 +893,22 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               } else if (typeof delta === "string" && delta) {
                 state.text += delta;
                 support.noteAssistantDelta?.(threadId, delta, state.text);
-                emit({ ...base(threadId, turnId), type: "content.delta", streamKind: "assistant_text", delta });
+                if (state.settled) break;
+                const gate = support.gateAssistantText?.(state.text) ?? "show";
+                if (gate === "drop") {
+                  state.pendingAssistant = "";
+                  state.droppedAssistant = true;
+                  const verdict = support.abandonAssistantText?.(threadId, state.text);
+                  if (verdict) abandonTurn(typeof verdict === "string" ? verdict : "antigravity_quota");
+                  break;
+                }
+                if (gate === "hold") {
+                  state.pendingAssistant += delta;
+                  break;
+                }
+                const pending = state.pendingAssistant + delta;
+                state.pendingAssistant = "";
+                if (pending) emit({ ...base(threadId, turnId), type: "content.delta", streamKind: "assistant_text", delta: pending });
               }
               break;
             }

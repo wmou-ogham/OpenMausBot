@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   ANTIGRAVITY_CAPACITY_DELAYS_MS,
+  ANTIGRAVITY_CAPACITY_HOLD_MS,
+  antigravityCapacityCatalogExhausted,
   antigravityCapacityDelay,
   antigravityCapacityExhausted,
   antigravityCapacityFallback,
+  antigravityCapacityGaveUpNotice,
   antigravityCapacityReason,
+  antigravityCapacityStream,
+  antigravityCapacitySwitchedNotice,
   antigravityExhaustedModel,
 } from "./antigravity-capacity.ts";
 
@@ -38,6 +43,22 @@ describe("antigravity capacity exhaustion", () => {
     ])).toBe("claude-sonnet-4-6");
     expect(antigravityCapacityFallback(catalog, [...catalog])).toBeNull();
     expect(antigravityCapacityReason("gemini-3.8-flash-high")).toBe("antigravity_capacity:gemini-3.8-flash-high");
+    expect(antigravityCapacityCatalogExhausted(catalog, [...catalog])).toBe(true);
+    expect(antigravityCapacityCatalogExhausted(catalog, ["gemini-3.8-flash-high"])).toBe(false);
+    expect(antigravityCapacityCatalogExhausted(["gemini-3.8-flash-high"], ["gemini-3.8-flash-high"])).toBe(false);
+  });
+
+  it("hides a capacity error while it is streaming and says which model answered", () => {
+    expect(antigravityCapacityStream("")).toBe("hold");
+    expect(antigravityCapacityStream("Agent execution err")).toBe("hold");
+    expect(antigravityCapacityStream("Hello")).toBe("show");
+    expect(antigravityCapacityStream(CAPACITY_ERROR)).toBe("drop");
+    expect(antigravityCapacityStream(`echo: ${CAPACITY_ERROR}`)).toBe("drop");
+    const ordinary = `Agent execution error: ${"the queue is healthy. ".repeat(20)}`;
+    expect(antigravityCapacityStream(ordinary)).toBe("show");
+    expect(antigravityCapacitySwitchedNotice("gemini-3.8-flash-medium")).toBe("已改用 gemini-3.8-flash-medium，接下來 15 分鐘先用這個模型。");
+    expect(antigravityCapacityGaveUpNotice()).not.toMatch(/503|MODEL_CAPACITY/);
+    expect(ANTIGRAVITY_CAPACITY_HOLD_MS).toBe(15 * 60 * 1000);
   });
 
   it("waits longer between new requests and then stops", () => {
