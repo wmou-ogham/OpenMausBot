@@ -4098,7 +4098,7 @@ function publishAntigravityCapacityFailure(event: RuntimeEvent): void {
  * left alone. With only one model, wait and send the same one again. */
 function scheduleAntigravityCapacityRetry(
   bot: BotRecord,
-  event: RuntimeEvent,
+  event: Extract<RuntimeEvent, { type: "turn.retrying" }>,
 ): { delayMs: number; attempt: number; label?: string } | null {
   const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
     message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
