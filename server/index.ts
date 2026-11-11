@@ -169,8 +169,11 @@ import {
 } from "./contracts.ts";
 import {
   ANTIGRAVITY_CAPACITY_DELAYS_MS,
-  ANTIGRAVITY_CAPACITY_REASON,
+  ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS,
   antigravityCapacityDelay,
+  antigravityCapacityFallback,
+  antigravityCapacityReasonModel,
+  isAntigravityCapacityReason,
 } from "./drivers/antigravity-capacity.ts";
 import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
 import { decodeGeneratedImage } from "./generated-image.ts";
@@ -4057,9 +4060,9 @@ interface AntigravityCapacityWait {
 }
 
 const antigravityCapacityWaits = new Map<string, AntigravityCapacityWait>();
-/** Host retries already sent for this thread. Survives the wait timer so the
- * next capacity failure uses the following delay instead of starting over. */
-const antigravityCapacityAttempts = new Map<string, number>();
+/** Models already refused for capacity on this thread, and how many times
+ * the same model was retried when nothing else was available. */
+const antigravityCapacityPlans = new Map<string, { tried: string[]; sameModelWaits: number; lastScheduled?: string }>();
 
 function cancelAntigravityCapacityWait(threadId: string): AntigravityCapacityWait | null {
   const wait = antigravityCapacityWaits.get(threadId);
@@ -4071,7 +4074,7 @@ function cancelAntigravityCapacityWait(threadId: string): AntigravityCapacityWai
 
 function clearAntigravityCapacityRetry(threadId: string): AntigravityCapacityWait | null {
   const wait = cancelAntigravityCapacityWait(threadId);
-  antigravityCapacityAttempts.delete(threadId);
+  antigravityCapacityPlans.delete(threadId);
   return wait;
 }
 
@@ -4090,32 +4093,44 @@ function publishAntigravityCapacityFailure(event: RuntimeEvent): void {
   bus.publish({ ...stamped, eventId: newId(), type: "turn.completed", ok: false, stopReason: "capacity", cost: null });
 }
 
-/** The CLI already refused more retries of the failed request. Wait, then
- * send the same user message as a new request. Stop during the wait cancels
- * it; past the delay list the short failure above is the reply. */
-function scheduleAntigravityCapacityRetry(bot: BotRecord, event: RuntimeEvent): { delayMs: number; attempt: number } | null {
-  const attempt = antigravityCapacityAttempts.get(event.threadId) ?? 0;
-  const delayMs = antigravityCapacityDelay(attempt);
+/** The CLI already refused more retries of the failed request. Prefer a
+ * different Antigravity model for the next request. The saved bot model is
+ * left alone. With only one model, wait and send the same one again. */
+function scheduleAntigravityCapacityRetry(
+  bot: BotRecord,
+  event: RuntimeEvent,
+): { delayMs: number; attempt: number; label?: string } | null {
   const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
     message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
-  if (delayMs === null || !user?.text) {
+  const plan = antigravityCapacityPlans.get(event.threadId) ?? { tried: [], sameModelWaits: 0 };
+  if (plan.lastScheduled && !plan.tried.includes(plan.lastScheduled)) plan.tried.push(plan.lastScheduled);
+  const exhausted = antigravityCapacityReasonModel(event.reason) ?? plan.lastScheduled ?? bot.modelSelection.model;
+  if (exhausted && !plan.tried.includes(exhausted)) plan.tried.push(exhausted);
+  const catalog = registry.get(bot.modelSelection.instanceId)?.models.options ?? [];
+  const next = antigravityCapacityFallback(catalog.map((option) => option.id), plan.tried);
+  const delayMs = next ? ANTIGRAVITY_CAPACITY_SWITCH_DELAY_MS : antigravityCapacityDelay(plan.sameModelWaits);
+  if (!user?.text || delayMs === null) {
     publishAntigravityCapacityFailure(event);
     return null;
   }
+  if (!next) plan.sameModelWaits += 1;
+  plan.lastScheduled = next ?? exhausted;
+  antigravityCapacityPlans.set(event.threadId, plan);
   cancelAntigravityCapacityWait(event.threadId);
-  antigravityCapacityAttempts.set(event.threadId, attempt + 1);
   const generation = directTurnGenerationByThread.get(event.threadId);
   const run = activeRoutineRunForThread(event.threadId);
+  const label = next ? catalog.find((option) => option.id === next)?.label ?? next : undefined;
   const timer = setTimeout(() => {
     const wait = antigravityCapacityWaits.get(event.threadId);
     if (wait?.timer !== timer) return;
     antigravityCapacityWaits.delete(event.threadId);
     if (directTurnGenerationByThread.get(event.threadId) !== generation) return;
-    console.error(`[antigravity-capacity] thread=${event.threadId} retrying after ${delayMs}ms (attempt ${attempt + 1}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`);
+    console.error(`[antigravity-capacity] thread=${event.threadId} retrying${next ? ` on ${next}` : ""} after ${delayMs}ms`);
     void startTurn(bot.id, user.text!, {
       threadId: event.threadId,
       userMessage: user,
       replacingTurn: true,
+      ...(next ? { modelOverride: next } : {}),
       ...(run ? {
         runOn: run.runOn,
         automationSource: run.triggerSource ?? (run.manual ? "manual" : "schedule"),
@@ -4129,7 +4144,7 @@ function scheduleAntigravityCapacityRetry(bot: BotRecord, event: RuntimeEvent): 
   }, delayMs);
   timer.unref?.();
   antigravityCapacityWaits.set(event.threadId, {
-    attempt: attempt + 1,
+    attempt: plan.tried.length,
     delayMs,
     generation,
     provider: event.provider,
@@ -4137,7 +4152,7 @@ function scheduleAntigravityCapacityRetry(bot: BotRecord, event: RuntimeEvent): 
     turnId: event.turnId,
     timer,
   });
-  return { delayMs, attempt: attempt + 1 };
+  return { delayMs, attempt: plan.tried.length, ...(label ? { label } : {}) };
 }
 
 function publishAntigravityCheckpointFailure(event: RuntimeEvent, detail?: string): void {
@@ -4818,14 +4833,17 @@ bus.subscribe((event: RuntimeEvent) => {
         } else if (!bot) publishAntigravityCheckpointFailure(event);
         break;
       }
-      if (event.reason === ANTIGRAVITY_CAPACITY_REASON) {
+      if (isAntigravityCapacityReason(event.reason)) {
         const scheduled = bot ? scheduleAntigravityCapacityRetry(bot, event) : null;
         if (scheduled) {
+          const seconds = Math.round(scheduled.delayMs / 1000);
           pushMessage({
             role: "bot",
             kind: "activity",
             tool: {
-              name: `model has no capacity — retrying in ${Math.round(scheduled.delayMs / 1000)}s (${scheduled.attempt}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`,
+              name: scheduled.label
+                ? `no capacity — trying ${scheduled.label} in ${seconds}s`
+                : `model has no capacity — retrying in ${seconds}s (${scheduled.attempt}/${ANTIGRAVITY_CAPACITY_DELAYS_MS.length})`,
               ok: true,
             },
           });
@@ -5939,6 +5957,8 @@ async function startTurn(
     /** The current turn already holds this thread. A quota reply is handing
      * the same user message to the next account without looking idle first. */
     replacingTurn?: boolean;
+    /** One turn on another model. The bot's saved selection stays put. */
+    modelOverride?: string;
     coordination?: { id: string; resumed: boolean; settle: (outcome: { ok: boolean; text: string }) => void };
   },
 ) {
@@ -6069,11 +6089,13 @@ async function startTurn(
       optionIds: instance.models.options.map((option) => option.id),
       fallback: instance.models.default,
     });
-  const model = opts?.runOn === "cloud" || switchedEngine ? instance.models.default : bot.modelSelection.model;
+  const model = opts?.modelOverride
+    ?? (opts?.runOn === "cloud" || switchedEngine ? instance.models.default : bot.modelSelection.model);
   // a cloud routine borrows the instance default model, so it borrows no
-  // per-bot effort either
-  const effort = opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.effort;
-  const variant = opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.variant;
+  // per-bot effort either. A capacity fallback names a whole model id
+  // (gemini-3.8-flash-medium) and must not reuse the exhausted model's effort.
+  const effort = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.effort;
+  const variant = opts?.modelOverride || opts?.runOn === "cloud" || switchedEngine ? undefined : bot.modelSelection.variant;
   assertModelVariantSupported({ variant, effort }, instance.adapter.capabilities);
   // A selection can be persisted while its engine is offline. Re-check when
   // the engine returns so an old or unsupported value never reaches a CLI.

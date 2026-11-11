@@ -4,6 +4,9 @@ import {
   ANTIGRAVITY_CAPACITY_DELAYS_MS,
   antigravityCapacityDelay,
   antigravityCapacityExhausted,
+  antigravityCapacityFallback,
+  antigravityCapacityReason,
+  antigravityExhaustedModel,
 } from "./antigravity-capacity.ts";
 
 const CAPACITY_ERROR = [
@@ -17,6 +20,24 @@ describe("antigravity capacity exhaustion", () => {
     expect(antigravityCapacityExhausted("reason:MODEL_CAPACITY_EXHAUSTED")).toBe(true);
     expect(antigravityCapacityExhausted("The queue has spare capacity for this job.")).toBe(false);
     expect(antigravityCapacityExhausted("")).toBe(false);
+  });
+
+  it("names the exhausted model and tries a lighter sibling before another provider", () => {
+    expect(antigravityExhaustedModel(CAPACITY_ERROR)).toBe("gemini-3.8-flash-high");
+    const catalog = [
+      "gemini-3.8-flash-high",
+      "gemini-3.8-flash-medium",
+      "gemini-3.8-flash-low",
+      "claude-sonnet-4-6",
+    ];
+    expect(antigravityCapacityFallback(catalog, ["gemini-3.8-flash-high"])).toBe("gemini-3.8-flash-medium");
+    expect(antigravityCapacityFallback(catalog, [
+      "gemini-3.8-flash-high",
+      "gemini-3.8-flash-medium",
+      "gemini-3.8-flash-low",
+    ])).toBe("claude-sonnet-4-6");
+    expect(antigravityCapacityFallback(catalog, [...catalog])).toBeNull();
+    expect(antigravityCapacityReason("gemini-3.8-flash-high")).toBe("antigravity_capacity:gemini-3.8-flash-high");
   });
 
   it("waits longer between new requests and then stops", () => {
