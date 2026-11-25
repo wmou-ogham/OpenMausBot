@@ -623,7 +623,7 @@ import { createSetupImportRoutes } from "./routes/setup-import.ts";
 import { createComputerRoutes } from "./routes/computers.ts";
 import { createStatusRoutes } from "./routes/status.ts";
 import { findAntigravityLeftovers, removeAntigravityLeftovers } from "./drivers/antigravity-temp.ts";
-import { withAntigravityThinking } from "./drivers/antigravity-models.ts";
+import { withAntigravityThinking } from "./drivers/antigravity-models.ts"; import { antigravityModelForSibling, antigravityQuotaCanSwitch, antigravityTurnFields, bindAntigravityTurns, clearAntigravityReplySwitch, handleAntigravityQuotaRetry, rerunAntigravityOnNextAccount, routeAntigravityInstance } from "./antigravity-turn.ts";
 import { createLiveRoutes } from "./routes/live.ts";
 import { createNotificationRoutes, notificationListedFor } from "./routes/notifications.ts";
 import { createTodayRoutes } from "./routes/today.ts"; import { createInboxRoutes } from "./routes/inbox.ts"; import { createSidebarSectionRoutes } from "./routes/sidebar-sections.ts";
@@ -6597,7 +6597,7 @@ bus.subscribe((event: RuntimeEvent) => {
       }
       break;
     }
-    case "turn.retrying":
+    case "turn.retrying": if (event.reason === "antigravity_quota") { handleAntigravityQuotaRetry(bot?.id, event); break; }
       pushMessage({
         role: "bot",
         kind: "activity",
@@ -6612,8 +6612,7 @@ bus.subscribe((event: RuntimeEvent) => {
         pushStoppedTurn(event.turnId);
         break;
       }
-      logFailedTurn(event); landParkedFiles(); // above the failure row, which stays the last, retryable line
-      pushMessage({ role: "bot", kind: "activity", tool: failedTurnTool(event.message, event) });
+      logFailedTurn(event); landParkedFiles(); if (!(bot && antigravityQuotaCanSwitch(event, event.limit !== undefined))) pushMessage({ role: "bot", kind: "activity", tool: failedTurnTool(event.message, event) }); // a quota wall moves to the next Google account, so that row would only flash
       if (event.setup && bot) { store.setTaskActivity(bot.id, event.threadId, "dead"); setupRecovery.failed(bot.id, event.threadId); }
       break;
     case "thread.token-usage.updated":
@@ -6622,7 +6621,7 @@ bus.subscribe((event: RuntimeEvent) => {
         turnContext.set(event.threadId, { tokens: event.contextTokens, window: event.contextWindow });
       }
       break;
-    case "turn.completed": {
+    case "turn.completed": { if (event.ok) clearAntigravityReplySwitch(event.threadId); else if (bot && antigravityQuotaCanSwitch(event, turnStops.read(event.threadId, event.turnId)?.flags?.limit !== undefined)) queueMicrotask(() => { rerunAntigravityOnNextAccount(bot.id, event); });
       askCards.settleWaitingOnPersonChips(event.threadId);
       const internal = isInternalTurn(event.threadId);
       clearInternalTurn(event.threadId);
@@ -6659,7 +6658,7 @@ bus.subscribe((event: RuntimeEvent) => {
       const facts = { ...turnStops.read(event.threadId, event.turnId)?.flags, stopReason: directRequestOwners.get(event.threadId)?.stopped ? "cancelled" : event.stopReason };
       const held = facts.limit ?? (signedOutStop(facts.stopReason, failureDetail) ? "signed-out" as const : undefined); // a limit or a sign-out: one incident a stretch, the person told by its own notice
       const fileIncident = () => { if (broken && (!held || limitTakeover.firstIncident(broken.id, broken.modelSelection, held, facts.limitResetsAt))) reportIncident({ kind: "failed", bot: broken, threadId: event.threadId, detail: failureDetail, facts, notified: Boolean(held) }); };
-      let directSettled = () => {}; const settledDirect = new Promise<void>((resolve) => { directSettled = resolve; }); if (failed && bot) void quotaSwitch.turnFailed(bot, event, internal, Promise.all([settledDirect, directTurnDispatchClaims.released(event.threadId)]));
+      let directSettled = () => {}; const settledDirect = new Promise<void>((resolve) => { directSettled = resolve; }); if (failed && bot && !antigravityQuotaCanSwitch(event, turnStops.read(event.threadId, event.turnId)?.flags?.limit !== undefined)) void quotaSwitch.turnFailed(bot, event, internal, Promise.all([settledDirect, directTurnDispatchClaims.released(event.threadId)]));
       else if (bot && event.ok) { quotaSwitch.turnSucceeded(bot, event.threadId); setupRecovery.succeeded(bot.id, event.threadId, { replayed, stopped }); }
       if (bot && event.ok && !stopped && completedTurnId && !routineRun && !coordinator.assignerOf(event.threadId)) askCards.ownQuestion(bot.id, event.threadId, completedTurnId);
       const lastReported = turnUsage.get(event.threadId);
@@ -7442,7 +7441,7 @@ async function beginTurn(
     goalRunId?: string;
     coordination?: { id: string; resumed: boolean; settle: (outcome: HostTurnResult) => void };
     /** Carries on a run already started (a hand-off's result, an answered card, a restart): usage caps never refuse it (usage-caps.ts). */ continuesRun?: boolean;
-    /** A person's own send: it may run beside a room turn on another thread. */ allowRoomTurnElsewhere?: boolean;
+    /** A person's own send: it may run beside a room turn on another thread. */ allowRoomTurnElsewhere?: boolean; /** Quota handoff: this thread is already in a turn. */ replacingTurn?: boolean;
   },
 ) {
   workspaceMaintenance.assertAvailable(); moveFreeze.assertTurns();
@@ -7483,11 +7482,11 @@ async function beginTurn(
     if (!answer.incident) throw Object.assign(new Error(changing), { status: 409, code: "settling" });
     computerSkipped ??= changing;
   }
-  if (threadBusy(botId, threadId)) throw Object.assign(new Error("this thread is already working — interrupt it first"), { status: 409, code: "thread_busy" });
+  if (!opts?.replacingTurn && threadBusy(botId, threadId)) throw Object.assign(new Error("this thread is already working — interrupt it first"), { status: 409, code: "thread_busy" });
   if (roomTurnHolds(activeGroupTurnForBot(botId), threadId, opts?.allowRoomTurnElsewhere === true)) {
     throw Object.assign(new Error("the bot is already working in a channel — wait for it to finish"), { status: 409, code: "thread_busy" });
   }
-  if (botAtThreadCapacity(botId, threadId, Boolean(opts?.coordination || opts?.peerAsk || opts?.commsDepth || opts?.cardContinuation || opts?.computerSelectionContinuation))) {
+  if (!opts?.replacingTurn && botAtThreadCapacity(botId, threadId, Boolean(opts?.coordination || opts?.peerAsk || opts?.commsDepth || opts?.cardContinuation || opts?.computerSelectionContinuation))) {
     throw Object.assign(new Error(botThreadLimitText(cfg, botThreadsHost(cloudPlanTier.starter()))), { status: 409, code: "thread_limit" });
   }
   // Revoke what a previous turn left behind before minting this turn's integrations.
@@ -7498,7 +7497,7 @@ async function beginTurn(
   if (!task) throw Object.assign(new Error("no such task"), { status: 404 });
   if (hostedModels && !hostedModels.allows(bot.modelSelection)) throw Object.assign(new Error(hostedModels.error()), { status: 409 });
   const plan = turnSurfacePlan(bot, opts?.runOn, threadId);
-  const instance = registry.get(bot.modelSelection.instanceId);
+  const instance = routeAntigravityInstance(registry, providerInstancesChanging, registry.get(bot.modelSelection.instanceId), task, threadId);
   if (!instance) {
     if (removedComputerInstanceIds(cfg.instances).has(bot.modelSelection.instanceId)) void retryComputerEngineMove();
     throw noAiNotice.refusal(threadId, opts?.sender, bot.modelSelection.instanceId) ?? Object.assign(new Error(`provider instance "${bot.modelSelection.instanceId}" is unavailable — pick another model in settings`), { status: 409 });
@@ -7543,7 +7542,7 @@ async function beginTurn(
   const automated = commsDepth > 0 || opts?.automationSource !== undefined
     || Boolean(opts?.unattended || opts?.cardContinuation || opts?.peerAsk || opts?.coordination || opts?.compactOnly || opts?.computerSelectionContinuation);
   const route = routeDirectTurn(bot, task, store.activePath(threadId), resolvedImages, instance, automated, quickFallback.refused(instance.instanceId));
-  const { model, effort, variant } = route;
+  const { model, effort, variant } = antigravityModelForSibling(route, instance, bot.modelSelection, registry.get(bot.modelSelection.instanceId)?.driverKind);
   assertModelVariantSupported({ variant, effort }, instance.adapter.capabilities);
   if (effort && !offeredEffortLevels(instance, model).includes(effort)) {
     throw Object.assign(
@@ -8320,7 +8319,7 @@ async function beginTurn(
         effort,
         variant,
         resumeCursor: dispatchContext.resumeCursor,
-        sessionReset: dispatchContext.sessionReset,
+        sessionReset: dispatchContext.sessionReset, ...antigravityTurnFields(instance, { threadId, userText: resolvedImages.text, messages: store.messagesFor(threadId).map((message) => ({ id: message.id, at: message.at })), userMessageId: userMessage.id, userMessageAt: userMessage.at, commsDepth, peerAsk: Boolean(opts?.peerAsk || userMessage.peerAsk), fromBot: Boolean(userMessage.sender), coordination: Boolean(opts?.coordination), cardContinuation: Boolean(opts?.cardContinuation), contextTokens: task.usage?.context?.tokens ?? 0, lastTurnInput: task.usage?.input ?? 0 }),
         ...(dispatchContext.recoveryText !== undefined ? { recoveryText: withTurnClock(clock, (posted?.text ?? "") + attachmentsForBox(dispatchContext.recoveryText, cwd, { botId: bot.id, threadId }) + shareNote.text) } : {}),
         transcript,
         system: prompt.text,
@@ -15120,7 +15119,7 @@ if (CLOUD_HOME) registerCloudPower(cloudPower = createCloudPower({ dataDir: DATA
   liveCall: () => liveCalls.current() !== null, computer: () => cloudComputerPower.awake() || boatLifecycleBusyBots.size > 0, nextDueAt: () => { const due = [routines?.nextDueAt() ?? null, proactive.brief.nextWakeAt(), botWaits.nextWakeAt(), checkBacks.nextDueAt()].filter((at): at is number => at !== null); return due.length ? Math.min(...due) : null; },
   maintenance: () => workspaceMaintenance.active || providerFleetReloading || providerAuthSessions.active || browserEngineInstall !== null } }));
 
-botLink.start(); let pausedSent = starterAwake.paused().join(); store.onChange((change) => { if (change.type === "bot.deleted") botHolds.forget("bot", change.botId); if (change.type !== "bot" && change.type !== "bot.deleted") return; const paused = starterAwake.paused().join(); if (paused !== pausedSent) { pausedSent = paused; broadcast({ kind: "config", ...configStatus() }); } });
+bindAntigravityTurns({ registry, changing: providerInstancesChanging, store, runningInstanceId: (threadId) => runningTurnEngines.get(threadId)?.instanceId, routine: (threadId) => { const run = activeRoutineRunForThread(threadId); return run ? { runOn: run.runOn, triggerSource: run.triggerSource, manual: run.manual } : null; }, startTurn: (botId, text, opts) => startTurn(botId, text, opts), publish: (event) => bus.publish(event), newId }); botLink.start(); let pausedSent = starterAwake.paused().join(); store.onChange((change) => { if (change.type === "bot.deleted") botHolds.forget("bot", change.botId); if (change.type !== "bot" && change.type !== "bot.deleted") return; const paused = starterAwake.paused().join(); if (paused !== pausedSent) { pausedSent = paused; broadcast({ kind: "config", ...configStatus() }); } });
 server.listen(PORT, listenHost(server), async () => {
   companyRuntimeReady(); cloudHealth?.speed.ready(); void tailnetShare.start(process.env);
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`); launchListening();

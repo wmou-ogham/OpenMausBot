@@ -82,7 +82,7 @@ export interface TaskRouteDeps {
 export function createTaskRoutes(deps: TaskRouteDeps): RouteHandler & { deleteTasks(botId: string, threadIds: string[]): ReturnType<TaskRouteDeps["store"]["deleteTasks"]> } {
   const {
     store, hostedModels, coordinator, handoffs, skillReview, threadStarters, phoneSecretSubmissions, titleRegenerations,
-    directTurnGenerationByThread, actorKey, cloudOwnerSession, cloudThreadRefusal, sharedWorkspaceFullAccessEnabled,
+    directTurnGenerationByThread, actorKey, cloudOwnerSession, cloudThreadRefusal,
     supportsApprovalMode, threadBusy, broadcast, notificationListed, publicBot, wireBot, wireTask, pageSize, messagePage, checkedModelSelection,
     checkedTaskModelSwitch, threadTitleGate, generateThreadTitle, settleDirectFollowup, clearTurnDigestState,
     revokeInternalCapabilitiesForThread, stagedSkillCleanupsForThread, rejectDeletedThreadSkillStages,
@@ -202,9 +202,9 @@ export function createTaskRoutes(deps: TaskRouteDeps): RouteHandler & { deleteTa
         return json(res, 400, { error: "new task approvalMode must be ask or full" });
       }
       if (body.approvalMode === "full") {
-        if (auth.kind !== "loopback" || !sharedWorkspaceFullAccessEnabled()) {
-          return json(res, 403, { error: "New Full tasks require the operator's dedicated shared-workspace policy" });
-        }
+        // A company workspace still takes Full only from the operator's policy. A person's own server
+        // accepts Full from the web, the phone, or the desktop, with no extra confirmation.
+        if (HOSTED_WORKSPACE) return json(res, 403, { error: HOSTED_FULL_ACCESS_REFUSAL });
         if (bot.approvalGrant) return json(res, 409, { error: "the bot's approval mode is still being confirmed" });
       }
       if (phoneSecretSubmissions.hasBot(bot.id)) {

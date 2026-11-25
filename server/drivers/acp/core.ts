@@ -29,7 +29,7 @@ import { formatQuietLimit, lastSeenPhrase, LIMIT_WORDS, promptIdleTimeoutMs, typ
 import { acpMissingSession, retryTransient } from "./rpc-error.ts";
 import { readSessionReport } from "./session-reports.ts";
 import { promptTokenUsage } from "./prompt-usage.ts";
-import { advertisedCommands, turnAnswers, turnSteering, type AcpSteerSupport } from "./steer.ts";
+import { advertisedCommands, turnAnswers, turnSteering, type AcpSteerSupport } from "./steer.ts"; import type { AcpAccountHooks } from "./account-hooks.ts";
 import { pickSessionModel, SessionModelControls, type AcpModelSelection } from "./session-model-controls.ts"; import { currentModeUpdateId, readSessionModes, withSessionMode, type AcpSessionModes } from "./session-modes.ts";
 import { notThisCli, versionFromProbe } from "./version-probe.ts"; import { engineHomes } from "../../engine-homes/engine-homes.ts"; import { apiKeyAccount } from "./api-key-account.ts";
 
@@ -92,7 +92,7 @@ export interface AcpConfig {
 }
 
 /** Per-CLI specifics plugged into the shared ACP runtime; `askTool` is the native tool `questionRequests` come from. */
-export interface AcpSupport extends AcpDriverHooks {
+export interface AcpSupport extends AcpDriverHooks, AcpAccountHooks {
   questionRequests?: Readonly<Record<string, AcpQuestionRequest>>; askTool?: string;
   /** Verified native catalog parameters, applied before both new and restored sessions. */
   toolScopeSessionParams?(turn: SendTurnInput, initializeResult: unknown, hasMcp: boolean,
@@ -247,8 +247,6 @@ export interface AcpSupport extends AcpDriverHooks {
    * quota, no subscription) in place of the provider's raw RPC text. */
   describeAccountError?(code: AccountErrorCode, model?: string): string;
   accountErrorText?(code: AccountErrorCode): ServerText | undefined;
-  /** Compose the session/prompt text. Default prepends the persona. */
-  buildPromptText?(turn: SendTurnInput): string;
   /** Rewrite a picker id (`omlx::model`) into the CLI-native id before spawn and session/select. */
   resolveTurnModel?(model: string | undefined, env: Record<string, string | undefined>, catalog: ModelCatalog): string | undefined;
   /** Map a saved selection onto the live session's catalog (a retired model id), once session/new or load answers. */
@@ -739,7 +737,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 if (support.resendsReasoningReply && messageId && messageId === current.state.textMessageId
                     && isHermesReasoningReplay(delta, current.state.text)) break;
                 current.state.textMessageId = messageId;
-                const streamed = receiveText(current.state, delta, support.replyFailure);
+                const streamed = receiveText(current.state, delta, support.replyFailure); if (streamed) support.noteAssistantDelta?.(threadId, streamed, current.state.text);
                 const trimmed = current.state.text.trimStart();
                 if (streamed && !trimmed.startsWith("<SYSTEM_MESSAGE") &&
                     !trimmed.startsWith("The following is a <SYSTEM_MESSAGE") &&
@@ -775,7 +773,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               break;
             }
             case "tool_call_update": {
-              trackRunningTool(current, u);
+              trackRunningTool(current, u); if (u.rawOutput ?? u.content) support.noteObserved?.(threadId, JSON.stringify(u.rawOutput ?? u.content).length);
               if (finished) toolEnded((typeof u.toolCallId === "string" && u.toolCallId) ? u.toolCallId : current.unkeyedToolIds.shift());
               break;
             }
@@ -950,10 +948,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         };
         const sessionKey = JSON.stringify([mcpServers, turn.toolScope ?? null, inheritedScopeFingerprint]);
 
-        if (turn.sessionReset) {
-          closeSession(threadId, "reset");
-          sessionAllows.delete(threadId);
-        }
+        const replayForPrompt = Boolean(!turn.sessionReset && typeof turn.resumeCursor === "string" && support.resumeDecision && !support.resumeDecision(turn).resume && (support.noteUsage?.(threadId, 0), true)); if (turn.sessionReset || replayForPrompt) { closeSession(threadId, "reset"); sessionAllows.delete(threadId); }
         const pooled = sessions.get(threadId);
         let session: AcpSession;
         if (pooled && !pooled.dead && !pooled.closing && pooled.contractKey === contractKey && !stderrFailureOf(pooled.host)
@@ -1119,7 +1114,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             let init = session.initResult;
             const heldSystem = () => sessionSystem(support, init, instanceId, turn);
 
-            await backgroundEnds.get(threadId); const cursor = turn.sessionReset ? null : support.backgroundWork ? support.backgroundWork.resumeCursor(turn.resumeCursor, session.sessionId, session) : typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
+            await backgroundEnds.get(threadId); let cursor = turn.sessionReset || replayForPrompt ? null : support.backgroundWork ? support.backgroundWork.resumeCursor(turn.resumeCursor, session.sessionId, session) : typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
             let promptTurn = turn;
             let rebuiltFromReplay = false;
             for (;;) {
@@ -1270,10 +1265,10 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             const { input: promptInput, note: contextNote, split } = turnPrompt(DRIVER_KIND, { threadId, sessionId }, turn, promptTurn, heldSystem(), ACP_PROMPT_RE_ANCHOR_TURNS);
             if (split) { state.usagePeak = split.previous?.peakUsed ?? split.previous?.lastUsed ?? null; pendingSplitReceipt = split; }
             const text = support.buildPromptText
-              ? support.buildPromptText(promptInput)
+              ? support.buildPromptText(promptInput, { resumed: Boolean(cursor && sessionId === cursor), replay: replayForPrompt })
               : promptInput.system
                 ? `${promptInput.system}\n\n${promptInput.text}`
-                : promptInput.text;
+                : promptInput.text; support.noteObserved?.(threadId, text.length);
             const imageBlocks = support.images === true && runtimeAcceptsImages
               ? await readAcpImageBlocks(turn.images ?? [])
               : []; const media = await readAcpMediaLinks(support.mediaLinks === true && !turn.guestConfined ? turn.text : "", imageBlocks.reduce((sum, block) => sum + Math.floor(block.data.length * 3 / 4), 0));
@@ -1314,11 +1309,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               const run = runOf(answer);
               if (run !== undefined && answers.slice(index + 1).some((later) => runOf(later) === run)) continue;
               const tokens = promptTokenUsage(answer);
-              if (tokens) emit({ ...base(threadId, turnId), type: "thread.token-usage.updated", ...tokens });
+              if (tokens) { support.noteUsage?.(threadId, tokens.input); emit({ ...base(threadId, turnId), type: "thread.token-usage.updated", ...tokens }); }
             }
             const final = answers.at(-1);
             const reason = final?.stopReason, reported = await promptOutcome?.(final); if (reported) throw reported;
-            if (failure && reason === "end_turn") { flushAssistantText(); throw new Error(failure); }
+            if (failure && reason === "end_turn") { flushAssistantText(); throw new Error(failure); } if (reason === "end_turn" && support.abandonAssistantText?.(threadId, state.text)) { state.text = ""; state.settled = true; active.delete(threadId); emit({ ...base(threadId, turnId), type: "turn.retrying", attempt: 1, delayMs: 0, reason: "antigravity_quota" }); closeSession(threadId, "reset"); return; }
             if (reason === "end_turn") settle(threadId, session, true, null);
             else if (reason === "cancelled" || state.stopped) settle(threadId, session, true, "cancelled");
             else {

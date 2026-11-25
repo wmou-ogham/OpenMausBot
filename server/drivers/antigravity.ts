@@ -60,6 +60,15 @@ import { resolveAntigravityReleaseAsset } from "./antigravity-release.ts";
 import { AntigravityProcesses } from "./antigravity-processes.ts";
 import { VERIFICATION_TEMP_KEY, scheduleAntigravityTempSweep } from "./antigravity-temp.ts";
 import { augmentedPath } from "../env-path.ts";
+import { antigravityReplyNeedsAccountSwitch, rememberAntigravityReplyNotice } from "../antigravity-pool.ts";
+import {
+  antigravityNoteAssistantText,
+  antigravityNoteObserved,
+  antigravityNoteUsage,
+  antigravityPromptText,
+  antigravityResumeDecision,
+  antigravitySessionTracking,
+} from "./antigravity-session.ts";
 import { killCliTree } from "../procs.ts";
 import { bundledEngineCatalog } from "../model-manifest/bundled.ts";
 import { currentEngineCatalog } from "../model-manifest/manifest.ts";
@@ -265,6 +274,22 @@ const support: AcpSupport = {
   sessionSystemPrompt: (initialized, instanceId) => launched.get(instanceId)?.nativeCli === true && antigravityTakesSystemPrompt(initialized),
   // One model family's quota is not the account's: Gemini and the models that share another allowance keep running.
   limitFacts: (_text, model) => antigravityLimitFacts(model, [...support.models.options.map((option) => option.id), ...offeredModels]),
+  resumeDecision: (turn) => {
+    const decision = antigravityResumeDecision(turn);
+    if (antigravitySessionTracking()) {
+      console.error(`[antigravity-session] thread=${turn.threadId} ${decision.resume ? "resume" : "new"} ${decision.reason}`);
+    }
+    return decision;
+  },
+  noteUsage: antigravityNoteUsage,
+  noteObserved: antigravityNoteObserved,
+  noteAssistantDelta: antigravityNoteAssistantText,
+  abandonAssistantText: (threadId, text) => {
+    if (!antigravityReplyNeedsAccountSwitch(text)) return false;
+    rememberAntigravityReplyNotice(threadId, text);
+    return true;
+  },
+  buildPromptText: (turn, ctx) => antigravityPromptText(turn, ctx),
   clientInfo: (instanceId) => antigravityClientInfo(launched.get(instanceId)?.version),
   // In `default` the native CLI asks before every edit; Auto-accept edits answers those, as `auto_edit` did.
   // Security: only a file edit inside the turn's folder is answered; one that names a command or another place is asked.

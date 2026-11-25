@@ -161,6 +161,14 @@ export interface SendTurnInput {
   engineAdmission?: (start: "process" | "session", joining?: number) => Promise<void>;
   /** The turn with the conversation replayed inline, sent once on a fresh session when the provider refuses resumeCursor before reading the prompt. */
   recoveryText?: string;
+  /** Antigravity-only hint for whether this turn should keep the ACP session. Other drivers ignore it. */
+  antigravityAffinity?: {
+    telegram?: boolean;
+    botReply?: boolean;
+    gapMs?: number | null;
+    inputTokens?: number;
+    forceNew?: boolean;
+  };
   /** Prior turns for transcript-replay providers (API-backed drivers). */
   transcript?: Array<{ role: "user" | "assistant"; text: string }>;
   /** Bot persona (name/title/description) as a system prompt. */

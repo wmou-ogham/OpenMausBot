@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { noteTelegramThread } from "../drivers/antigravity-session.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 
@@ -240,6 +241,7 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
         return json(res, 400, { error: "threadId must be a task id" });
       }
       const threadId = body.threadId ?? bot.threadId;
+      if (body.origin === "telegram") noteTelegramThread(threadId);
       if ((pressed || fromAnApp) && store.groupByThread(threadId)) return json(res, 409, { error: ROOM_VIEW_ONLY });
       const notYours = cloudGuestSendRefusal(auth, threadId);
       if (notYours) return json(res, 403, { error: notYours });
